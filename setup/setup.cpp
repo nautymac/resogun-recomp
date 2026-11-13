@@ -587,6 +587,23 @@ bool skip_intro(const fs::path& root, const fs::path& save) {
     }
 }
 
+int stereo_mode(const fs::path& root, const fs::path& save) {
+    std::error_code ec;
+    fs::path ini = save / L"settings.ini";
+    if (!fs::is_regular_file(ini, ec))
+        ini = root / L"settings.ini";
+    try {
+        std::optional<std::wstring> value = read_setting(ini, L"stereo");
+        if (!value) return 0;
+        std::wstring v = lower(*value);
+        if (v == L"sbs") return 2;
+        // The game takes on, 1, true and geo for sr as well.
+        return v == L"sr" || v == L"on" || v == L"1" || v == L"true" || v == L"geo" ? 1 : 0;
+    } catch (const Error&) {
+        return 0;
+    }
+}
+
 bool has_saves(const fs::path& save) {
     std::error_code ec;
     fs::path data = save / L"savedata";
@@ -704,6 +721,14 @@ fs::path install(const Options& opt, const Log& log) {
                 continue;
             write_setting(ini, L"skip_intro", value);
             log(L"set      skip_intro=" + value + L" in " + text(ini));
+        }
+    }
+    if (opt.stereo) {
+        for (const fs::path& ini : {settings, save / L"settings.ini"}) {
+            if (!fs::is_regular_file(ini, ec))
+                continue;
+            write_setting(ini, L"stereo", *opt.stereo);
+            log(L"set      stereo=" + *opt.stereo + L" in " + text(ini));
         }
     }
     write_paths(root / L"paths.ini", game, save, dlc);

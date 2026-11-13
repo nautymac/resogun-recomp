@@ -25,6 +25,8 @@ struct Options {
     std::filesystem::path save; // saves and the launch log (run.py's --user)
     std::optional<std::filesystem::path> copy_saves_from; // the old save folder, whose saves go to `save`
     std::optional<bool> skip_intro; // settings.ini skip_intro to write; unset keeps what is there
+    // settings.ini stereo to write (stereo 3D: off, sr or sbs, see kStereoModes); unset keeps it
+    std::optional<std::wstring> stereo;
     std::filesystem::path dlc; // optional: one more folder of DLC (e.g. shadPS4's addcont); empty for none
     // Optional: called as each step starts, with how far along the install is (0 to 1) and the step.
     std::function<void(double, const std::wstring&)> progress;
@@ -85,6 +87,12 @@ bool has_saves(const std::filesystem::path& save);
 // settings.ini skip_intro as the game reads it: from the save folder's file when there is one,
 // else the release folder's; false when unset.
 bool skip_intro(const std::filesystem::path& root, const std::filesystem::path& save);
+// Stereo 3D (settings.ini stereo, gpu/shim/resogun_settings.h): off, woven for an SR panel (sr, needs
+// ps2sr.dll next to the game exe) or side by side (sbs).
+constexpr const wchar_t* kStereoModes[] = {L"off", L"sr", L"sbs"};
+// settings.ini stereo as the game reads it (the save folder's file, else the release folder's), as
+// an index into kStereoModes; 0 (off) when unset.
+int stereo_mode(const std::filesystem::path& root, const std::filesystem::path& save);
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b);
 
 // Sets up opt.root, reporting each step through `log`. Throws Error. Returns the game exe's path.

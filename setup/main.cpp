@@ -3,14 +3,15 @@
 // Resogun dump, so the game starts from resogun.exe or a desktop shortcut.
 //
 // With no arguments it opens a window: the game folder (the dump), the extra DLC folder, the save
-// folder, whether to skip the intro logos (settings.ini skip_intro), Install and Exit; after an
+// folder, 3D (settings.ini stereo: off, SR panel, side by side), whether to skip the intro logos
+// (settings.ini skip_intro), Install and Exit; after an
 // install it offers a desktop shortcut. Run it again to change a folder, or after unpacking a newer
 // release over the folder.
 // With arguments it installs from the command line:
 //
 //     resogun-setup.exe --game <dump or eboot.bin> [--save <folder>] [--copy-saves]
 //                           [--dlc <folder>|--no-dlc] [--skip-intro|--play-intro] [--progress]
-//                           [--shortcut <folder>|desktop]
+//                           [--stereo off|sr|sbs] [--shortcut <folder>|desktop]
 
 #include "setup.h"
 
@@ -81,7 +82,7 @@ private:
 constexpr wchar_t kUsage[] =
     L"usage: resogun-setup.exe --game <dump or eboot.bin> [--save <folder>] [--copy-saves]\n"
     L"                             [--dlc <folder>|--no-dlc] [--skip-intro|--play-intro] [--progress]\n"
-    L"                             [--shortcut <folder>|desktop]\n"
+    L"                             [--stereo off|sr|sbs] [--shortcut <folder>|desktop]\n"
     L"  --game        the decrypted game dump (eboot.bin, sce_module, sce_sys, stream.dat); only ever read\n"
     L"  --save        where your saves go (default: the one paths.ini names, else save\\ here)\n"
     L"  --copy-saves  when --save changes, copy the saves from the old save folder\n"
@@ -90,6 +91,8 @@ constexpr wchar_t kUsage[] =
     L"  --skip-intro, --play-intro\n"
     L"                skip the start-up logos and notices, or show them again\n"
     L"                (settings.ini skip_intro; default: leave it as it is)\n"
+    L"  --stereo      3D: off, sr (woven for an SR panel; needs ps2sr.dll here) or sbs (side by\n"
+    L"                side, for a 3D TV or monitor) (settings.ini stereo; default: leave it as it is)\n"
     L"  --progress    also print \"progress <0 to 1> <step>\" lines (for RecompLauncher)\n"
     L"  --shortcut    also write the game's shortcut into this folder, or onto the Desktop\n"
     L"Sets up the folder this exe is in. With no arguments, opens the setup window.";
@@ -99,6 +102,7 @@ int run_cli(const std::vector<std::wstring>& args) {
     std::wstring game, save, shortcut, dlc;
     bool copy_saves = false, no_dlc = false, progress = false;
     std::optional<bool> skip_intro;
+    std::optional<std::wstring> stereo;
     for (size_t i = 0; i < args.size(); ++i) {
         const std::wstring& a = args[i];
         std::wstring* value = a == L"--game"       ? &game
@@ -112,6 +116,12 @@ int run_cli(const std::vector<std::wstring>& args) {
             copy_saves = true;
         } else if (a == L"--skip-intro" || a == L"--play-intro") {
             skip_intro = a == L"--skip-intro";
+        } else if (a == L"--stereo" && i + 1 < args.size()) {
+            stereo = args[++i];
+            if (*stereo != L"off" && *stereo != L"sr" && *stereo != L"sbs") {
+                con.err(std::wstring(kUsage) + L"\n\n--stereo takes off, sr or sbs");
+                return 2;
+            }
         } else if (a == L"--no-dlc") {
             no_dlc = true;
         } else if (a == L"--progress") {
@@ -135,6 +145,7 @@ int run_cli(const std::vector<std::wstring>& args) {
         if (copy_saves)
             opt.copy_saves_from = saves_to_move(opt.root, opt.save);
         opt.skip_intro = skip_intro;
+        opt.stereo = stereo;
         if (progress)
             opt.progress = [&](double done, const std::wstring& what) {
                 wchar_t fraction[16];
@@ -170,6 +181,8 @@ enum : int {
     kSaveBrowse,
     kPlay,
     kSkipIntro,
+    kStereo, // kStereo + i: setup::kStereoModes[i]
+    kStereoLast = kStereo + 2,
 };
 enum : UINT {
     kMsgLog = WM_APP + 1, // lParam: std::wstring* line
@@ -197,6 +210,8 @@ struct Folder {
 
 struct Ui {
     HWND wnd = nullptr, play = nullptr, install = nullptr, exit = nullptr, skip_intro = nullptr;
+    HWND stereo[3] = {}; // the 3D choices (setup::kStereoModes)
+    int stereo_mode = 0;
     Folder game{L"Game folder", 66}, dlc{L"Extra DLC folder (optional)", 146}, save{L"Save folder", 226};
     std::vector<HWND> inputs; // disabled while installing (Play Game too, and until the folder is set up)
     HFONT font = nullptr, bold = nullptr, title = nullptr;
@@ -210,9 +225,11 @@ struct Ui {
 Ui ui;
 
 // Layout in 96-dpi units; the client area is kWidth x kHeight.
-constexpr int kWidth = 640, kHeight = 452;
+constexpr int kWidth = 640, kHeight = 532;
 constexpr int kRowLeft = 36, kRowRight = 604, kRowHeight = 72, kFieldLeft = 58, kBrowseLeft = 480, kBrowseWidth = 104;
-constexpr int kPanelTop = 40, kPanelBottom = 352, kButtonsTop = 404;
+constexpr int kPanelTop = 40, kPanelBottom = 432, kButtonsTop = 484;
+constexpr int kStereoY = 306, kIntroY = 390; // the 3D row, the intro box
+constexpr const wchar_t* kStereoLabels[] = {L"Off", L"SR panel", L"Side by side"};
 
 int px(int v) {
     return MulDiv(v, static_cast<int>(ui.dpi), 96);
@@ -307,6 +324,19 @@ void paint(HDC dc) {
     text(dc, L"RESOGUN SETUP", tab, ui.title, color::Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     for (const Folder* f : {&ui.game, &ui.dlc, &ui.save})
         paint_folder(dc, *f);
+    // The 3D row: its choice buttons and what the chosen one does.
+    shape(dc, rect(kRowLeft, kStereoY, kRowRight - kRowLeft, kRowHeight), px(10), color::RowTop, color::RowBottom,
+          color::RowEdge);
+    text(dc, L"3D (stereo)", rect(kFieldLeft, kStereoY + 8, 240, 24), ui.bold, color::Text,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::error_code ec;
+    const bool no_bridge = ui.stereo_mode == 1 && !fs::is_regular_file(ui.root / L"ps2sr.dll", ec);
+    const wchar_t* note = ui.stereo_mode == 0   ? L"2D"
+                          : no_bridge           ? L"No ps2sr.dll here: side by side instead"
+                          : ui.stereo_mode == 1 ? L"Woven for an SR panel (SpatialLabs)"
+                                                : L"For a 3D TV or monitor in SBS mode";
+    text(dc, note, rect(kFieldLeft + 240, kStereoY + 8, kRowRight - 20 - kFieldLeft - 240, 24), ui.font,
+         no_bridge ? color::Bad : color::Good, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     text(dc, ui.status, rect(24, kPanelBottom + 10, kWidth - 48, kButtonsTop - kPanelBottom - 16), ui.font,
          ui.status_bad ? color::Bad : color::Help, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
 }
@@ -316,8 +346,9 @@ void paint(HDC dc) {
 void draw_button(const DRAWITEMSTRUCT& d) {
     HDC dc = d.hDC;
     RECT r = d.rcItem;
+    const bool choice = d.CtlID >= kStereo && d.CtlID <= kStereoLast; // a 3D choice
     fill(dc, r, d.hwndItem == ui.skip_intro ? color::Panel : d.CtlID == kGameBrowse || d.CtlID == kDlcBrowse ||
-                                                                 d.CtlID == kSaveBrowse
+                                                                 d.CtlID == kSaveBrowse || choice
                                                              ? color::RowBottom
                                                              : color::Back);
     bool disabled = d.itemState & ODS_DISABLED, pressed = d.itemState & ODS_SELECTED, focus = d.itemState & ODS_FOCUS;
@@ -341,12 +372,13 @@ void draw_button(const DRAWITEMSTRUCT& d) {
         text(dc, label, t, ui.font, disabled ? color::Dim : color::Help, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    bool primary = d.hwndItem == (setup::ready(ui.root) && !IsWindowEnabled(ui.install) ? ui.play : ui.install);
+    bool primary = choice ? int(d.CtlID) - kStereo == ui.stereo_mode
+                          : d.hwndItem == (setup::ready(ui.root) && !IsWindowEnabled(ui.install) ? ui.play : ui.install);
     COLORREF top = disabled ? color::OffTop : primary ? color::FocusTop : color::RowTop;
     COLORREF bottom = disabled ? color::OffBottom : primary ? color::FocusBottom : color::RowBottom;
     if (pressed)
         std::swap(top, bottom);
-    bool browse = d.CtlID == kGameBrowse || d.CtlID == kDlcBrowse || d.CtlID == kSaveBrowse;
+    bool browse = d.CtlID == kGameBrowse || d.CtlID == kDlcBrowse || d.CtlID == kSaveBrowse || choice;
     int skew = browse ? 0 : (r.bottom - r.top) / 4; // Browse sits on a row's gradient: no corners to fill
     shape(dc, r, skew, top, bottom, focus ? color::FocusEdge : disabled ? color::Dim : color::RowEdge,
           focus ? px(2) : 1);
@@ -451,6 +483,7 @@ void start_install() {
     opt.save = save;
     opt.dlc = dlc;
     opt.skip_intro = ui.skip;
+    opt.stereo = setup::kStereoModes[ui.stereo_mode];
     try {
         if (auto old = saves_to_move(opt.root, opt.save)) {
             std::wstring ask = L"Copy your saves to the new save folder?\n\nFrom: " + old->wstring() + L"\nTo: " + save;
@@ -530,13 +563,20 @@ void create_controls() {
     add_folder(ui.game, kGameEdit, kGameBrowse);
     add_folder(ui.dlc, kDlcEdit, kDlcBrowse);
     add_folder(ui.save, kSaveEdit, kSaveBrowse);
+    // The 3D choices, side by side across the row's field.
+    constexpr int kChoiceGap = 8;
+    const int choice_width = (kRowRight - 22 - kFieldLeft - 2 * kChoiceGap) / 3;
+    for (int i = 0; i < 3; ++i)
+        ui.stereo[i] = add(WC_BUTTONW, kStereoLabels[i], WS_TABSTOP | BS_OWNERDRAW,
+                           rect(kFieldLeft + i * (choice_width + kChoiceGap), kStereoY + 35, choice_width, 30),
+                           kStereo + i);
     ui.skip_intro = add(WC_BUTTONW, L"Skip the intro logos (skip_intro=0 in settings.ini brings them back)",
-                        WS_TABSTOP | BS_OWNERDRAW, rect(kRowLeft + 4, 310, kRowRight - kRowLeft - 8, 30), kSkipIntro);
+                        WS_TABSTOP | BS_OWNERDRAW, rect(kRowLeft + 4, kIntroY, kRowRight - kRowLeft - 8, 30), kSkipIntro);
     ui.play = add(WC_BUTTONW, L"Play Game", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 3 * 128 + 8, kButtonsTop, 120, 36), kPlay);
     ui.install = add(WC_BUTTONW, L"Install", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 2 * 128 + 8, kButtonsTop, 120, 36), IDOK);
     ui.exit = add(WC_BUTTONW, L"Exit", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 128 + 8, kButtonsTop, 120, 36), IDCANCEL);
     ui.inputs = {ui.game.edit, ui.game.browse, ui.dlc.edit, ui.dlc.browse, ui.save.edit, ui.save.browse,
-                 ui.skip_intro, ui.exit};
+                 ui.stereo[0], ui.stereo[1], ui.stereo[2], ui.skip_intro, ui.exit};
 
     // Start from what the last install chose (paths.ini here, else the per-user copy), else an empty
     // game and DLC folder and save\ here.
@@ -553,6 +593,7 @@ void create_controls() {
     SetWindowTextW(ui.save.edit, save.c_str());
     // What settings.ini says now; Install writes the box's state, so unticking it brings the logos back.
     ui.skip = setup::skip_intro(ui.root, save);
+    ui.stereo_mode = setup::stereo_mode(ui.root, save); // Install writes the chosen one
     set_status(setup::ready(ui.root) ? L"The game is set up. Press Play Game, or change the folders and press Install."
                : paths              ? L"This version isn't set up yet. Press Install."
                                     : L"Choose your game dump (and a DLC folder if you have one), then press Install.");
@@ -581,6 +622,21 @@ LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             ui.skip = !ui.skip;
             InvalidateRect(ui.skip_intro, nullptr, FALSE);
             return 0;
+        case kStereo:
+        case kStereo + 1:
+        case kStereo + 2: {
+            const int mode = LOWORD(wp) - kStereo;
+            if (mode != ui.stereo_mode) {
+                ui.stereo_mode = mode;
+                for (HWND h : ui.stereo)
+                    InvalidateRect(h, nullptr, FALSE);
+                RECT row = rect(kRowLeft, kStereoY, kRowRight - kRowLeft, 34);
+                InvalidateRect(wnd, &row, FALSE);
+                if (setup::ready(ui.root))
+                    set_status(L"Press Install to save the 3D choice (the game keeps it in settings.ini).");
+            }
+            return 0;
+        }
         case kGameBrowse:
             browse(ui.game.edit, L"Select the game folder (the one with eboot.bin)");
             return 0;
