@@ -155,6 +155,31 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
     }
+    /* resogun: code without frame pointers (a GPU driver) ends the chain at once: the thread's name
+     * and the executable's return addresses found on its stack (llvm-addr2line names them). */
+    {
+        typedef HRESULT (WINAPI *GetDescription)(HANDLE, PWSTR *);
+        GetDescription get_description=(GetDescription)(void (*)(void))GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+        PWSTR description=NULL;
+        if (get_description && SUCCEEDED(get_description(GetCurrentThread(),&description)) && description) {
+            fprintf(stderr,"  thread name: %ls\n",description);
+            LocalFree(description);
+        }
+        HMODULE exe=GetModuleHandleA(NULL);
+        uintptr_t sp=(uintptr_t)c->Rsp;
+        int shown=0;
+        for (uintptr_t a=sp; a<sp+0x20000 && shown<40; a+=8) {
+            uintptr_t value=0;
+            SIZE_T got=0;
+            if (!ReadProcessMemory(GetCurrentProcess(),(void *)a,&value,sizeof(value),&got) || got!=sizeof(value)) break;
+            HMODULE module=NULL;
+            if (value>(uintptr_t)exe && value-(uintptr_t)exe<0x10000000 &&
+                GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)value,&module) && module==exe) {
+                fprintf(stderr,"  stack+0x%" PRIxPTR ": resogun.exe+0x%" PRIxPTR "\n",a-sp,value-(uintptr_t)exe);
+                ++shown;
+            }
+        }
+    }
     if (isa_table) isa_rewrite_report(isa_table,stderr);
     fflush(NULL);
     TerminateProcess(GetCurrentProcess(),3);
