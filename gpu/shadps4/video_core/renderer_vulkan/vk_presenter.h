@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_sr_output.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -37,6 +38,8 @@ struct Frame {
     bool is_hdr{false};
     u8 id{};
     vk::Format format{}; ///< resogun: of `image` (screenshots)
+    /// resogun: stereo 3D: the image holds the two eyes side by side (PrepareFrame).
+    bool stereo{false};
 };
 
 enum SchedulerType {
@@ -103,10 +106,20 @@ private:
     Frame* GetRenderFrame();
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
+    /// resogun: stereo 3D: the display buffer's two layers through the post passes into the
+    /// halves of `frame` (left layer 0, right layer 1). False when the buffer has one layer.
+    bool ComposeStereo(vk::CommandBuffer cmdbuf, VideoCore::Image& image,
+                       const VideoCore::ImageViewInfo& view_info, vk::Extent2D image_size,
+                       Frame& frame);
 
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
+    /// resogun: stereo 3D: each eye at half the frame's width (ComposeStereo).
+    std::array<Frame, 2> stereo_eyes{};
+    /// resogun: the side-by-side picture woven for an SR panel at the present (present thread).
+    std::unique_ptr<SrOutput> sr_output;
+
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
     u32 expected_frame_height{1080};

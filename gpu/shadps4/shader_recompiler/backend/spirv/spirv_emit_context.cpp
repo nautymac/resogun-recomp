@@ -8,6 +8,7 @@
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/microinstruction.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/stereo.h"
 
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -89,6 +90,53 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
 }
 
 EmitContext::~EmitContext() = default;
+
+bool EmitContext::NeedsViewIndex() const {
+    if (!Stereo::geo_layers || sw_stage == SwStage::Compute) {
+        return false;
+    }
+    if (hw_stage == HwStage::Vertex && runtime_info.hw.vs.stereo) {
+        return true;
+    }
+    if (sw_stage == SwStage::Geometry && runtime_info.hw.gs.stereo) {
+        return true;
+    }
+    for (const auto& image : info.images) {
+        if (Stereo::ImageSharp(image.GetSharp(info), image.is_array)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Id EmitContext::StereoParam(u32 index) {
+    const Id ptr = OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                 push_data_block, ConstU32(PushData::StereoIndex), ConstU32(index));
+    return OpBitcast(F32[1], OpLoad(U32[1], ptr));
+}
+
+Id EmitContext::StereoLayer() {
+    if (sw_stage == SwStage::Compute) {
+        const Id ptr = OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                     push_data_block, ConstU32(PushData::StereoIndex), ConstU32(0u));
+        return OpLoad(U32[1], ptr);
+    }
+    return Sirit::ValidId(view_index) ? OpLoad(U32[1], view_index) : u32_zero_value;
+}
+
+Id EmitContext::StereoCoords(const TextureDefinition& texture, Id coords, bool floating) {
+    if (!texture.stereo_layer) {
+        return coords;
+    }
+    const Id layer = StereoLayer();
+    if (floating) {
+        return OpCompositeConstruct(F32[3], OpCompositeExtract(F32[1], coords, 0u),
+                                    OpCompositeExtract(F32[1], coords, 1u),
+                                    OpConvertUToF(F32[1], layer));
+    }
+    return OpCompositeConstruct(U32[3], OpCompositeExtract(U32[1], coords, 0u),
+                                OpCompositeExtract(U32[1], coords, 1u), layer);
+}
 
 Id EmitContext::Def(const IR::Value& value) {
     if (!value.IsImmediate()) {
@@ -309,6 +357,14 @@ void EmitContext::DefineWorkgroupIndex() {
 }
 
 void EmitContext::DefineInputs() {
+    // resogun: stereo 3D in one pass (stereo.h): which eye this invocation draws.
+    if (NeedsViewIndex()) {
+        view_index = DefineVariable(U32[1], spv::BuiltIn::ViewIndex, spv::StorageClass::Input);
+        if (sw_stage == SwStage::Fragment) {
+            Decorate(view_index, spv::Decoration::Flat);
+        }
+        Name(view_index, "view_index");
+    }
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
@@ -763,7 +819,7 @@ void EmitContext::DefineOutputs() {
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
     const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2]),
+                                         U32[4], U32[4], U32[4], U32[2], U32[2]),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -788,6 +844,10 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 80U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 96U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 112U);
+    // resogun: stereo 3D in one pass (stereo.h): separation and convergence (float bits) for
+    // draws, the eye for dispatches.
+    MemberName(struct_type, PushData::StereoIndex, "stereo");
+    MemberDecorate(struct_type, PushData::StereoIndex, spv::Decoration::Offset, 120U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
@@ -968,7 +1028,7 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
                     image.GetNumberFmt());
 }
 
-Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
+Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type, bool stereo) {
     const auto image = desc.GetSharp(ctx.info);
     const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
     const auto type = image.GetViewType(desc.is_array);
@@ -979,7 +1039,8 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     case AmdGpu::ImageType::Color1DArray:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, true, false, sampled, format);
     case AmdGpu::ImageType::Color2D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, false, sampled, format);
+        // resogun: a two-layer scene target is an array (stereo.h).
+        return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, stereo, false, sampled, format);
     case AmdGpu::ImageType::Color2DArray:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, sampled, format);
     case AmdGpu::ImageType::Color2DMsaa:
@@ -1001,7 +1062,8 @@ void EmitContext::DefineImagesAndSamplers() {
         const MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const VectorIds& data_types = GetAttributeType(*this, nfmt);
         const Id sampled_type = data_types[1];
-        const Id image_type{ImageType(*this, image_desc, sampled_type)};
+        const bool stereo = Stereo::ImageSharp(sharp, image_desc.is_array);
+        const Id image_type{ImageType(*this, image_desc, sampled_type, stereo)};
 
         const u32 num_bindings = image_desc.NumBindings(info);
         Id pointee_type = image_type;
@@ -1023,6 +1085,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .stereo_layer = stereo,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);

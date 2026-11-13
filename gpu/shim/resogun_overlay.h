@@ -50,7 +50,10 @@ bool Visible();
 void ShowNotice(const std::string& text, int milliseconds = 3000);
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
+/// `side_by_side` (stereo 3D): the overlay laid out for the whole display, squeezed into each
+/// half, so that each eye sees it at the screen's depth.
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            bool side_by_side = false);
 
 /// A dialog is shown: the game's input is held neutral.
 bool CapturesInput();

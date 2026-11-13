@@ -374,6 +374,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     rcas_pass.Create(device, instance.GetAllocator(), swapchain.GetSurfaceFormat().format);
     ResogunOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
+    // resogun: stereo 3D for an SR panel (vk_sr_output.h): only made when 3D was chosen at start.
+    if (ResogunSettings::StereoLayers()) {
+        sr_output = CreateSrOutput(instance, present_scheduler);
+    }
     // resogun: the window was created hidden. Until the game's first frame, a while later,
     // nothing else draws into it, so it gets the start-up picture as soon as it is shown (cloaked on
     // Windows, at its final size) and is revealed with the picture already in it. Drawn once more
@@ -443,6 +447,13 @@ Presenter::~Presenter() {
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
     }
+    for (auto& eye : stereo_eyes) {
+        if (eye.image) {
+            vmaDestroyImage(instance.GetAllocator(), eye.image, eye.allocation);
+            device.destroyImageView(eye.image_view);
+        }
+    }
+    sr_output.reset(); // the panel's lens off before the device goes
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -710,9 +721,18 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+    // resogun: stereo 3D in one pass (vk_stereo.h): the two layers of the display buffer side by
+    // side, each through the passes below at half the frame's width.
+    frame->stereo = false;
+    if (ResogunSettings::Get().stereo.load(std::memory_order_relaxed) != ResogunSettings::StereoOff) {
+        auto& image = texture_cache.GetImage(image_id);
+        frame->stereo = ComposeStereo(cmdbuf, image, view_info, image_size, *frame);
+    }
     // resogun: with sharpening on, the post process pass draws into the RCAS pass's image and
     // RCAS draws that into the frame.
-    if (ResogunSettings::Get().sharpening.load(std::memory_order_relaxed)) {
+    if (frame->stereo) {
+        // Drawn above.
+    } else if (ResogunSettings::Get().sharpening.load(std::memory_order_relaxed)) {
         pp_pass.Render(cmdbuf, image_view, image_size, rcas_pass.Input(cmdbuf, draw_scheduler, *frame),
                        pp_settings);
         rcas_pass.Render(cmdbuf, *frame, HostPasses::RcasPass::DefaultSharpness);
@@ -747,9 +767,105 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     return frame;
 }
 
+bool Presenter::ComposeStereo(vk::CommandBuffer cmdbuf, VideoCore::Image& image,
+                              const VideoCore::ImageViewInfo& view_info, vk::Extent2D image_size,
+                              Frame& frame) {
+    if (image.stereo_layers < 2 || frame.width < 2) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::printf("Stereo 3D: a display buffer with one layer, shown flat\n");
+        }
+        return false;
+    }
+    const u32 eye_width = frame.width / 2;
+    const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const bool sharpen = ResogunSettings::Get().sharpening.load(std::memory_order_relaxed);
+    for (u32 eye = 0; eye < 2; ++eye) {
+        Frame& out = stereo_eyes[eye];
+        if (out.width != eye_width || out.height != frame.height || out.format != frame.format ||
+            !out.image) {
+            if (out.image) {
+                // A previous frame's copy may still read it.
+                draw_scheduler.Finish();
+            }
+            RecreateFrame(&out, eye_width, frame.height);
+        }
+        const vk::ImageMemoryBarrier2 to_target{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .image = out.image,
+            .subresourceRange = color,
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_target});
+        auto eye_info = view_info;
+        eye_info.stereo = eye == 0 ? 0 : 1; // the layer alone (ImageView: stereo 1 is layer 1)
+        const vk::ImageView source = *image.FindView(eye_info).image_view;
+        if (sharpen) {
+            pp_pass.Render(cmdbuf, source, image_size,
+                           rcas_pass.Input(cmdbuf, draw_scheduler, out), pp_settings);
+            rcas_pass.Render(cmdbuf, out, HostPasses::RcasPass::DefaultSharpness);
+        } else {
+            pp_pass.Render(cmdbuf, source, image_size, out, pp_settings);
+        }
+    }
+    // Both eyes (General after the passes) into the frame's halves; the frame waits in
+    // ColorAttachmentOptimal (PrepareFrame's barrier) and ends in General as after the passes.
+    const auto barrier = [&](vk::Image img, vk::ImageLayout from, vk::ImageLayout to,
+                             vk::AccessFlags2 src_access, vk::AccessFlags2 dst_access) {
+        return vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = src_access,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = dst_access,
+            .oldLayout = from,
+            .newLayout = to,
+            .image = img,
+            .subresourceRange = color,
+        };
+    };
+    const vk::AccessFlags2 written = vk::AccessFlagBits2::eColorAttachmentWrite |
+                                     vk::AccessFlagBits2::eShaderWrite;
+    const std::array before{
+        barrier(stereo_eyes[0].image, vk::ImageLayout::eGeneral,
+                vk::ImageLayout::eTransferSrcOptimal, written, vk::AccessFlagBits2::eTransferRead),
+        barrier(stereo_eyes[1].image, vk::ImageLayout::eGeneral,
+                vk::ImageLayout::eTransferSrcOptimal, written, vk::AccessFlagBits2::eTransferRead),
+        barrier(frame.image, vk::ImageLayout::eColorAttachmentOptimal,
+                vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eNone,
+                vk::AccessFlagBits2::eTransferWrite),
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(before.size()),
+                             .pImageMemoryBarriers = before.data()});
+    for (u32 eye = 0; eye < 2; ++eye) {
+        cmdbuf.copyImage(stereo_eyes[eye].image, vk::ImageLayout::eTransferSrcOptimal, frame.image,
+                         vk::ImageLayout::eTransferDstOptimal,
+                         vk::ImageCopy{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                       .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                       .dstOffset = {s32(eye * eye_width), 0, 0},
+                                       .extent = {eye_width, frame.height, 1}});
+    }
+    const auto after = barrier(frame.image, vk::ImageLayout::eTransferDstOptimal,
+                               vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eTransferWrite,
+                               vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &after});
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::printf("Stereo 3D: the display buffer's two layers side by side, %ux%u per eye\n",
+                    eye_width, frame.height);
+    }
+    return true;
+}
+
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
+    frame->stereo = false;
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -930,7 +1046,26 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // resogun: the game frame is blitted (letterboxed) straight into the swapchain image.
     const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
+    // resogun: stereo 3D for an SR panel: the side-by-side picture is woven in the swapchain image
+    // by D3D11 before the present (decided before the command buffer is taken: making the shared
+    // textures submits and waits on this scheduler). A flat frame (loading, one layer) is shown
+    // as it is, with the lens off.
+    auto& settings = ResogunSettings::Get();
+    const bool weave_wanted =
+        sr_output && settings.stereo.load(std::memory_order_relaxed) == ResogunSettings::StereoSr &&
+        !swapchain.GetHDR();
+    const bool weave = weave_wanted && frame->stereo &&
+                       sr_output->Ready(window.GetWindowInfo().render_surface,
+                                        swapchain.GetSurfaceFormat().format,
+                                        swapchain.GetExtent().width, swapchain.GetExtent().height);
+    if (sr_output) {
+        sr_output->Lens(weave);
+        if (weave_wanted && frame->stereo) {
+            settings.stereo_problem = weave ? nullptr : sr_output->Problem();
+        }
+    }
     const auto cmdbuf = scheduler.CommandBuffer();
+    bool overlay = false; // the menu or notices drawn over the frame
 
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
@@ -992,15 +1127,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             SampleForSplash(instance, scheduler, cmdbuf, *frame);
         }
         // resogun: the settings menu / FPS counter over the frame, at display resolution.
-        const bool overlay = ResogunOverlay::Visible();
+        overlay = ResogunOverlay::Visible();
+        // Woven for an SR panel: the image stays where it is (the copy into D3D11 follows).
         const std::array post_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
                 .dstAccessMask = overlay ? vk::AccessFlagBits::eColorAttachmentRead |
                                                vk::AccessFlagBits::eColorAttachmentWrite
+                                 : weave ? vk::AccessFlagBits::eTransferRead
                                          : vk::AccessFlagBits::eNone,
                 .oldLayout = vk::ImageLayout::eTransferDstOptimal,
                 .newLayout = overlay ? vk::ImageLayout::eColorAttachmentOptimal
+                             : weave ? vk::ImageLayout::eTransferDstOptimal
                                      : vk::ImageLayout::ePresentSrcKHR,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1022,7 +1160,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            ResogunOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            // resogun: stereo 3D: the menu in each eye's half, at the screen's depth.
+            ResogunOverlay::Render(cmdbuf, swapchain.ImageView(), extent, frame->stereo);
+        }
+        if (overlay && !weave) {
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -1047,6 +1188,34 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    if (weave) {
+        // resogun: the picture into the shared texture, woven by D3D11, and back (vk_sr_output.h):
+        // the present waits for the copy back.
+        sr_output->RecordCopyIn(cmdbuf, swapchain_image,
+                                overlay ? vk::ImageLayout::eColorAttachmentOptimal
+                                        : vk::ImageLayout::eTransferDstOptimal,
+                                info);
+        scheduler.Flush(info);
+        sr_output->Weave();
+        const auto back = scheduler.CommandBuffer();
+        SubmitInfo copy_out{};
+        sr_output->RecordCopyOut(back, swapchain_image, copy_out);
+        copy_out.AddSignal(swapchain.GetPresentReadySemaphore());
+        copy_out.AddSignal(frame->present_done);
+        scheduler.Flush(copy_out);
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            if (!swapchain.Present() && !window.IsMinimized() && window.GetWidth() > 0 &&
+                window.GetHeight() > 0) {
+                swapchain.Recreate(window.GetWidth(), window.GetHeight());
+            }
+        }
+        free_frame();
+        if (!is_reusing_frame && is_game_frame) {
+            DebugState.IncFlipFrameNum();
+        }
+        return;
+    }
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);

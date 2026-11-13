@@ -1126,10 +1126,74 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     initialized = true;
 }
 
+// resogun: stereo 3D keys, menus open or not: Ctrl+F3 on/off (between the mode 3D started with and
+// off), Ctrl+F5/F6 depth, Ctrl+F7/F8 convergence, Ctrl+F9 eyes swapped. Each change is shown and
+// saved to settings.ini at once. A held key repeats at most ~6 times a second; F3 and F9 once.
+static bool StereoKey(const SDL_Event& event) {
+    if (event.type != SDL_EVENT_KEY_DOWN || !(event.key.mod & SDL_KMOD_CTRL)) {
+        return false;
+    }
+    const SDL_Keycode key = event.key.key;
+    if (key != SDLK_F3 && key != SDLK_F5 && key != SDLK_F6 && key != SDLK_F7 && key != SDLK_F8 &&
+        key != SDLK_F9) {
+        return false;
+    }
+    if (event.key.repeat && (key == SDLK_F3 || key == SDLK_F9)) {
+        return true;
+    }
+    static auto last = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (event.key.repeat && now - last < std::chrono::milliseconds(160)) {
+        return true;
+    }
+    last = now;
+    auto& s = ResogunSettings::Get();
+    if (s.startup_stereo == ResogunSettings::StereoOff || !ResogunSettings::StereoLayers()) {
+        ShowNotice("3D: set stereo=sr or sbs in settings.ini and restart the game", 3000);
+        return true;
+    }
+    switch (key) {
+    case SDLK_F3:
+        s.stereo = s.stereo == ResogunSettings::StereoOff ? s.startup_stereo : ResogunSettings::StereoOff;
+        break;
+    case SDLK_F5:
+        s.stereo_depth = std::max(0.0f, std::round((s.stereo_depth - 0.1f) * 100.0f) / 100.0f);
+        break;
+    case SDLK_F6:
+        s.stereo_depth = std::min(10.0f, std::round((s.stereo_depth + 0.1f) * 100.0f) / 100.0f);
+        break;
+    case SDLK_F7:
+        s.stereo_convergence = std::max(0.01f, s.stereo_convergence / 1.1f);
+        break;
+    case SDLK_F8:
+        s.stereo_convergence = std::min(100000.0f, s.stereo_convergence * 1.1f);
+        break;
+    case SDLK_F9:
+        s.stereo_swap = !s.stereo_swap;
+        break;
+    default:
+        break;
+    }
+    char text[160];
+    if (s.stereo == ResogunSettings::StereoOff) {
+        std::snprintf(text, sizeof text, "3D: off (Ctrl+F3 turns it on)");
+    } else {
+        std::snprintf(text, sizeof text, "3D: depth %.2f%%  convergence %.2f%s", s.stereo_depth.load(),
+                      s.stereo_convergence.load(), s.stereo_swap ? "  eyes swapped" : "");
+    }
+    std::printf("Stereo 3D: %s\n", text + 4);
+    ShowNotice(text, 2500);
+    ResogunSettings::SaveDisplay();
+    return true;
+}
+
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
         return false;
+    }
+    if (!text_entry_active && StereoKey(event)) {
+        return true;
     }
     if (choice_active) {
         return HandleChoiceEvent(event);
@@ -1289,7 +1353,7 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent, bool side_by_side) {
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
@@ -1331,7 +1395,45 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     {
         // Font atlas uploads submit to the graphics queue themselves.
         std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        if (!side_by_side) {
+            ImGui_ImplVulkan_RenderDrawData(draw_data, cmdbuf);
+        } else {
+            // resogun: stereo 3D: a copy of every draw list moved one display width right, and
+            // the whole drawn as twice as wide at half scale (the backend's viewport is
+            // DisplaySize * FramebufferScale). One call: the backend's vertex buffers rotate once
+            // per call.
+            const float width = draw_data->DisplaySize.x;
+            const int lists = draw_data->CmdListsCount;
+            const int vertices = draw_data->TotalVtxCount, indices = draw_data->TotalIdxCount;
+            ImVector<ImDrawList*> copies;
+            for (int i = 0; i < lists; ++i) {
+                ImDrawList* copy = draw_data->CmdLists[i]->CloneOutput();
+                for (ImDrawVert& vertex : copy->VtxBuffer) {
+                    vertex.pos.x += width;
+                }
+                for (ImDrawCmd& command : copy->CmdBuffer) {
+                    command.ClipRect.x += width;
+                    command.ClipRect.z += width;
+                }
+                copies.push_back(copy);
+            }
+            for (ImDrawList* copy : copies) {
+                draw_data->AddDrawList(copy);
+            }
+            draw_data->DisplaySize.x = 2.0f * width;
+            draw_data->FramebufferScale = ImVec2(0.5f, 1.0f);
+            ImGui_ImplVulkan_RenderDrawData(draw_data, cmdbuf);
+            draw_data->DisplaySize.x = width;
+            draw_data->FramebufferScale = ImVec2(1.0f, 1.0f);
+            draw_data->CmdLists.resize(lists);
+            draw_data->CmdListsCount = lists;
+            draw_data->TotalVtxCount = vertices;
+            draw_data->TotalIdxCount = indices;
+            for (ImDrawList* copy : copies) {
+                IM_DELETE(copy);
+            }
+        }
     }
     cmdbuf.endRendering();
 }

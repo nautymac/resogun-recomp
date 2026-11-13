@@ -155,6 +155,18 @@ public:
         return custom_border_color;
     }
 
+    /// resogun: memory and semaphores shared with D3D11 (VK_KHR_external_*_win32).
+    bool IsExternalWin32Supported() const {
+        return external_win32;
+    }
+
+    /// resogun: stereo 3D in one pass (vk_stereo.h): multiview with the stages the game may use
+    /// (geometry and tessellation shaders).
+    bool IsMultiviewSupported() const {
+        return vk11_features.multiview && vk11_features.multiviewGeometryShader &&
+               vk11_features.multiviewTessellationShader;
+    }
+
     /// Returns true when VK_EXT_shader_stencil_export is supported
     bool IsShaderStencilExportSupported() const {
         return shader_stencil_export;
@@ -523,6 +535,7 @@ private:
     vk::PhysicalDeviceVulkan13Properties vk13_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
     vk::PhysicalDeviceFeatures features;
+    vk::PhysicalDeviceVulkan11Features vk11_features;
     vk::PhysicalDeviceVulkan12Features vk12_features;
     vk::PhysicalDeviceVulkan13Features vk13_features;
     vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic_state_3_features;
@@ -556,6 +569,7 @@ private:
     bool list_restart{};
     bool provoking_vertex{};
     bool shader_stencil_export{};
+    bool external_win32{}; // resogun: VK_KHR_external_memory_win32 and VK_KHR_external_semaphore_win32
     bool image_load_store_lod{};
     bool amd_gcn_shader{};
     bool amd_shader_trinary_minmax{};

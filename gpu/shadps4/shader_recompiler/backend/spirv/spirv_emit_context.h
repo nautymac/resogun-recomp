@@ -252,6 +252,15 @@ public:
     Id vertex_index{};
     Id instance_id{};
     Id push_data_block{};
+    // resogun: stereo 3D in one pass (stereo.h): the eye being drawn (BuiltIn ViewIndex); set
+    // for the vertex stages that move Position and for stages reading a two-layer target.
+    Id view_index{};
+    [[nodiscard]] bool NeedsViewIndex() const;
+    /// The layer of a two-layer scene target for this invocation (U32): ViewIndex, or the
+    /// dispatch's eye from the push constants in compute.
+    [[nodiscard]] Id StereoLayer();
+    /// The push constants' stereo word `index` (0 separation, 1 convergence) as a float.
+    [[nodiscard]] Id StereoParam(u32 index);
     Id base_vertex{};
     Id base_instance{};
     Id frag_coord{};
@@ -306,8 +315,13 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        /// resogun: a two-layer scene target: the image type is arrayed, layer = eye (stereo.h).
+        bool stereo_layer = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
+    /// resogun: `coords` (two components) with the eye's layer appended when `texture` is a
+    /// two-layer scene target; `floating` for sampling coordinates, else integer texels.
+    [[nodiscard]] Id StereoCoords(const TextureDefinition& texture, Id coords, bool floating);
 
     enum class PointerType : u32 {
         U8,

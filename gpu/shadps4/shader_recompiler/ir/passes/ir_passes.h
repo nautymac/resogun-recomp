@@ -25,6 +25,9 @@ void LowerPhisToRegsPass(IR::Program& program);
 void DeadCodeEliminationPass(IR::Program& program);
 /// resogun: exact integers from interpolated float varyings on GPUs without manual interpolation.
 void InterpolatedIntegerPass(IR::Program& program);
+/// resogun: stereo 3D in one pass: positions rebuilt from the eye's depth, moved back to the
+/// centre camera (stereo_unshift_pass.cpp).
+void StereoUnshiftPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);

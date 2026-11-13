@@ -128,6 +128,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
                 .extent = {render_state.width, render_state.height},
             },
         .layerCount = render_state.num_layers,
+        .viewMask = render_state.view_mask,
         .colorAttachmentCount = render_state.num_color_attachments,
         .pColorAttachments = color_attachments.data(),
         .pDepthAttachment = db.has_depth ? &depth_attachment : nullptr,
@@ -437,9 +438,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
+    // resogun: one entry per possible wait (SubmitInfo holds four; the SR output waits on a third).
+    static constexpr std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
         vk::PipelineStageFlagBits::eAllCommands,
         vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eAllCommands,
+        vk::PipelineStageFlagBits::eAllCommands,
     };
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {

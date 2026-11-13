@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -177,6 +179,7 @@ private:
         std::array<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> ids{};
         std::array<VideoCore::ImageViewInfo, AmdGpu::NUM_COLOR_BUFFERS + 1> views{};
         u32 mrt_mask = 0;
+        bool stereo = false; ///< resogun: the key's multiview bit
         u32 num_samples = 0;
         std::array<u8, AmdGpu::NUM_COLOR_BUFFERS> color_samples{};
         u64 generation = 0;
@@ -243,6 +246,14 @@ private:
     const AmdGpu::Regs& Regs() const;
     AmdGpu::CbDbExtent CbExtent(u32 index) const;
     AmdGpu::CbDbExtent DbExtent() const;
+    /// resogun: stereo 3D in one pass: every target of the pass has two layers (stereo.h).
+    bool TargetsStereo(const GraphicsPipeline* pipeline);
+    /// The settings' stereo parameters into push_data for this draw.
+    void SetStereoPushData(bool both_eyes);
+    /// Records `dispatch` for the right eye's layer and leaves the left eye's pushed.
+    static void RecordStereoRightEye(vk::CommandBuffer cmdbuf, vk::PipelineLayout layout,
+                                     const std::function<void()>& dispatch);
+    void LogStereoPass(const GraphicsPipelineKey& key, bool stereo);
 
     void BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                      Shader::Backend::Bindings& binding,

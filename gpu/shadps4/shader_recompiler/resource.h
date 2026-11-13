@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include "common/types.h"
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
@@ -216,6 +218,8 @@ struct PushData {
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 UdRegsIndex = 4;
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
+    /// resogun: stereo 3D in one pass (stereo.h): U32x2 after the buffer offsets (byte 120).
+    static constexpr u32 StereoIndex = BufOffsetIndex + NUM_BUFFERS / 16 + 1;
 
     float xoffset;
     float yoffset;
@@ -223,6 +227,11 @@ struct PushData {
     float yscale;
     std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
+    /// resogun: stereo 3D in one pass (stereo.h). Draws: the right eye's clip-space x shift per
+    /// unit of (w - convergence) and the convergence distance in clip w, as float bits (the left
+    /// eye takes the negative shift; 0 in a one-layer pass). Dispatches: [0] is the layer of the
+    /// stereo images the dispatch reads and writes (0 left), pushed per eye.
+    std::array<u32, 2> stereo;
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
@@ -231,5 +240,6 @@ struct PushData {
 };
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
+static_assert(offsetof(PushData, stereo) == 120, "resogun: the stereo words at byte 120");
 
 } // namespace Shader

@@ -35,6 +35,14 @@ inline int ParseAudioChannels(std::string_view value) {
 enum RenderResolution : int { Render1080p = 0, Render4k, RenderResolutionCount };
 inline constexpr std::string_view RenderResolutionKeys[RenderResolutionCount] = {"1080p", "4k"};
 
+/// Stereo 3D (vk_stereo.h; key stereo, RESOGUN_STEREO): off, woven for an SR panel (sr: Acer
+/// SpatialLabs and other Leia SR displays, vk_sr_output.h; the window shows the eyes side by side
+/// when SR is not there), or side by side (sbs) for a 3D TV or monitor. Both eyes are drawn from
+/// the same frame into the two layers of the scene targets by multiview: the layers are made at
+/// start, so 3D chosen while the game runs needs a restart, and 3D renders at 1080p in 16:9.
+enum StereoMode : int { StereoOff = 0, StereoSr, StereoSbs, StereoModeCount };
+inline constexpr std::string_view StereoModeKeys[StereoModeCount] = {"off", "sr", "sbs"};
+
 /// The game's display width at 2160 lines for an output of w x h: 3840 (16:9) for a 16:9 output
 /// (within 1%: 1366x768 is 16:9), else from 2880 (4:3) to 7680 (32:9), in steps of 16 so the
 /// 1080p row and the checkerboard scene (both half) stay whole: 1920x1200 gives 3456, 2560x1080
@@ -170,7 +178,25 @@ struct Values {
     /// Whether the window's display offers an HDR10 surface: -1 not known yet, set by the
     /// swapchain (vk_swapchain.cpp).
     std::atomic<int> hdr_display{-1};
+    /// Stereo 3D (StereoMode): what is shown now (Ctrl+F3 switches between the start mode and
+    /// off) and what the game started with (the scene targets have two layers only then).
+    std::atomic<int> stereo{StereoOff};
+    int startup_stereo = StereoOff;
+    /// Eye separation: % of the picture's width each eye's picture moves for things far away.
+    std::atomic<float> stereo_depth{1.0f};
+    /// The view distance shown at the screen's depth (clip w, the game's units): nearer things
+    /// come out of the screen, farther ones go behind it. The ship and the HUD fly at about 62
+    /// (measured: their disparity is 0 there).
+    std::atomic<float> stereo_convergence{60.0f};
+    /// Left and right exchanged.
+    std::atomic<bool> stereo_swap{false};
+    /// Why 3D draws flat or is not woven for an SR panel (set by the renderer), or null.
+    std::atomic<const char*> stereo_problem{nullptr};
 };
+
+/// The scene targets have a layer per eye: 3D was on at start (RESOGUN_STEREO_LAYERS=0 or 1
+/// overrides it for tests).
+bool StereoLayers();
 
 Values& Get();
 

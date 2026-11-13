@@ -24,6 +24,8 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/stereo.h"
+#include "resogun_settings.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -88,6 +90,19 @@ constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
+
+// resogun: stereo 3D in one pass: fragment shaders that rebuild positions from the scene depth
+// through their texture coordinate are corrected per eye (stereo_unshift_pass.cpp decides by the
+// pattern, in every fragment shader while the layers exist); RESOGUN_STEREO_UNSHIFT=0 turns it off.
+static bool StereoUnshiftEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("RESOGUN_STEREO_UNSHIFT");
+        return !env || env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool StereoPass(const AmdGpu::Regs& regs, u32 mrt_mask); // resogun: stereo 3D in one pass
 
 static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsOutputControl& ctl) {
     u32 num_outputs = 0;
@@ -203,6 +218,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         const auto params_vc = AmdGpu::GetParams(regs.vs_program);
         info.hw.gs.vs_copy = params_vc.code;
         info.hw.gs.vs_copy_hash = params_vc.hash;
+        info.hw.gs.stereo = sel.stereo;
         DumpShader(info.hw.gs.vs_copy, info.hw.gs.vs_copy_hash, Shader::HwStage::Vertex, 0,
                    "copy.bin");
         break;
@@ -215,6 +231,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
             !instance.IsDepthClipControlSupported() &&
             regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
         info.hw.vs.clip_disable = regs.IsClipDisabled();
+        info.hw.vs.stereo = sel.stereo;
         break;
     }
     case HwStage::Fragment: {
@@ -228,6 +245,9 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
                 ? regs.aa_config.NumSamples()
                 : 1;
         info.hw.fs.z_export_format = regs.z_export_format;
+        // resogun: not sel.stereo: the pass is decided once the fragment shader is known. In a
+        // one-layer pass the separation is 0 (SetStereoPushData), which leaves positions alone.
+        info.hw.fs.stereo_unshift = Shader::Stereo::geo_layers && StereoUnshiftEnabled();
         u8 stencil_ref_export_enable = regs.depth_shader_control.stencil_op_val_export_enable |
                                        regs.depth_shader_control.stencil_test_val_export_enable;
         info.hw.fs.mrtz_mask = regs.depth_shader_control.z_export_enable |
@@ -775,6 +795,10 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     // everything read from guest memory for the specialization) must match as well. This is
     // the per-stage work GetProgram does on the regular path.
     const auto& regs = liverpool->regs;
+    // resogun: the stereo bit follows a setting that may have changed since the worker ran.
+    if (prepared.key.stereo != (StereoPass(regs, prepared.key.mrt_mask) ? 1u : 0u)) {
+        return nullptr;
+    }
     for (u32 i = 0; i < prepared.num_stages; ++i) {
         const auto& stage = prepared.stages[i];
         const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
@@ -974,10 +998,70 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     return it->second.get();
 }
 
+// resogun: stereo 3D in one pass (stereo.h): the pass draws into two-layer scene targets when
+// every target the shader writes and the depth target are scene-sized single-sample single-slice
+// surfaces (and there is at least one). Pure in the registers, like the texture cache's
+// StereoEligible, so that the GPU thread and the draw-preparation workers agree.
+static bool StereoPass(const AmdGpu::Regs& regs, u32 mrt_mask) {
+    if (!Shader::Stereo::geo_layers ||
+        ResogunSettings::Get().stereo.load(std::memory_order_relaxed) == ResogunSettings::StereoOff) {
+        return false;
+    }
+    // RESOGUN_STEREO_LOG=1: the first targets that keep a pass mono (once per distinct target).
+    static const bool log = [] {
+        const char* env = std::getenv("RESOGUN_STEREO_LOG");
+        return env && env[0] == '1';
+    }();
+    const auto mono = [&](const char* what, u32 index, u32 pitch, u32 height, u32 samples,
+                          u32 slices, u32 format) {
+        if (!log) {
+            return false;
+        }
+        static std::mutex seen_mutex;
+        static std::unordered_set<u64> seen;
+        const u64 key = u64(pitch) | u64(height) << 16 | u64(samples) << 32 | u64(slices) << 36 |
+                        u64(format) << 44 | u64(index) << 52 | u64(what[0]) << 56;
+        std::scoped_lock lock{seen_mutex};
+        if (seen.size() < 48 && seen.insert(key).second) {
+            std::printf("Stereo 3D: mono pass: %s%u %ux%u samples %u slices %u format %u\n", what,
+                        index, pitch, height, samples, slices, format);
+        }
+        return false;
+    };
+    u32 targets = 0;
+    const bool skip_cb = regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb; ++cb) {
+        const auto& col_buf = regs.color_buffers[cb];
+        if (!col_buf || !regs.color_target_mask.GetMask(cb) || (mrt_mask & (1u << cb)) == 0) {
+            continue;
+        }
+        if (col_buf.NumSamples() != 1 || col_buf.NumSlices() != 1 ||
+            AmdGpu::IsBlockCoded(col_buf.GetDataFmt()) ||
+            !Shader::Stereo::SceneSize(col_buf.Pitch(), col_buf.Height())) {
+            return mono("cb", u32(cb), col_buf.Pitch(), col_buf.Height(), col_buf.NumSamples(),
+                        col_buf.NumSlices(), u32(col_buf.GetDataFmt()));
+        }
+        ++targets;
+    }
+    const bool depth = GetEffectiveDepthStencilState(regs).needs_attachment &&
+                       (regs.depth_buffer.DepthValid() || regs.depth_buffer.StencilValid());
+    if (depth) {
+        const auto& db = regs.depth_buffer;
+        if (db.NumSamples() != 1 || regs.depth_view.NumSlices() != 1 ||
+            !Shader::Stereo::SceneSize(db.Pitch(), db.Height())) {
+            return mono("db", 0, db.Pitch(), db.Height(), db.NumSamples(),
+                        regs.depth_view.NumSlices(), u32(db.z_info.format));
+        }
+        ++targets;
+    }
+    return targets > 0;
+}
+
 bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     std::memset(&sel.graphics_key, 0, sizeof(GraphicsPipelineKey));
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
+    sel.stereo = false; // resogun: decided in RefreshGraphicsStages, once the fragment shader is known
 
     // resogun: a depth/stencil buffer that cannot affect the draw is not attached: on the PC a
     // smaller one would crop a full-screen pass (eltutz, vk_depth_stencil_state.h).
@@ -1121,6 +1205,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
     key.num_color_attachments = std::bit_width(key.mrt_mask);
+    // resogun: stereo 3D in one pass: the vertex stages bound below get the eye offset.
+    sel.stereo = StereoPass(regs, key.mrt_mask);
+    key.stereo = sel.stereo ? 1u : 0u;
 
     switch (regs.stage_enable.raw) {
     case AmdGpu::ShaderStageEnable::VgtStages::EsGs:

@@ -40,9 +40,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // resogun: interpolated integer fix (Pascal)
-static constexpr u32 ShaderMetaVersion = 7u; // resogun: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // resogun: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderBinaryVersion = 8u; // resogun: interpolated integer fix (Pascal); stereo 3D (8)
+static constexpr u32 ShaderMetaVersion = 8u; // resogun: ImageResource::needs_native; stereo runtime info (8)
+static constexpr u32 PipelineKeyVersion = 6u; // resogun: Info layout (ImageResource::needs_native); GraphicsPipelineKey::stereo (6)
 } // namespace Serialization
 
 namespace Vulkan {
@@ -405,7 +405,11 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     const std::filesystem::path& directory) {
     using namespace PipelineBinaryCache;
     const auto& dispatch = VULKAN_HPP_DEFAULT_DISPATCHER;
-    const bool enabled = global_key.keySize && EmulatorSettings.IsPipelineCacheEnabled();
+    // resogun: stereo 3D: multiview pipelines (view mask 0b11) stay out of the binaries: NVIDIA's
+    // driver crashed building one with VK_KHR_pipeline_binary in use (read of a null pointer in
+    // nvoglv64.dll, in the first level, every run); the driver's pipeline cache still holds them.
+    const bool enabled =
+        global_key.keySize && EmulatorSettings.IsPipelineCacheEnabled() && !key.stereo;
     const auto create = [&](vk::PipelineCache used_cache, const auto& used_info, bool restored) {
         const auto started = std::chrono::steady_clock::now();
         auto result = device.createGraphicsPipelineUnique(used_cache, used_info);

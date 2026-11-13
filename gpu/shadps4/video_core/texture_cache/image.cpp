@@ -4,6 +4,7 @@
 #include "resogun_toggles.h"
 #include <ranges>
 #include "common/assert.h"
+#include "shader_recompiler/stereo.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -85,6 +86,13 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     return feature_flags;
 }
 
+bool StereoEligible(const ImageInfo& info) {
+    return Shader::Stereo::geo_layers && info.type == AmdGpu::ImageType::Color2D &&
+           info.resources.layers == 1 && info.num_samples == 1 && info.size.depth == 1 &&
+           !info.props.is_block && !info.props.is_volume &&
+           Shader::Stereo::SceneSize(info.size.width, info.size.height);
+}
+
 UniqueImage::~UniqueImage() {
     if (image) {
         vmaDestroyImage(allocator, image, allocation);
@@ -147,6 +155,7 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 
     usage_flags = ImageUsageFlags(instance, info);
     format_features = FormatFeatureFlags(usage_flags);
+    stereo_layers = StereoEligible(info) ? 2u : 1u;
     if (info.props.is_depth) {
         aspect_mask = vk::ImageAspectFlagBits::eDepth;
         if (info.props.has_stencil) {
@@ -198,7 +207,7 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
             .depth = info.size.depth,
         },
         .mipLevels = static_cast<u32>(info.resources.levels),
-        .arrayLayers = static_cast<u32>(info.resources.layers),
+        .arrayLayers = stereo_layers > 1 ? stereo_layers : static_cast<u32>(info.resources.layers),
         .samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples),
         .tiling = tiling,
         .usage = usage_flags,
@@ -250,9 +259,11 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
     const bool partially_transited = !subresource_states.empty();
 
+    // resogun: a stereo target's two host layers always move together (the guest sees one).
+    const u32 host_layers = stereo_layers > 1 ? stereo_layers : u32(info.resources.layers);
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
-            subresource_states.resize(info.resources.levels * info.resources.layers);
+            subresource_states.resize(info.resources.levels * host_layers);
             std::fill(subresource_states.begin(), subresource_states.end(), last_state);
         }
 
@@ -265,16 +276,16 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                                            subres_range->base.level + subres_range->extent.levels)
                 : std::views::iota(0u, info.resources.levels);
         const auto layers =
-            needs_partial_transition
+            needs_partial_transition && stereo_layers == 1
                 ? std::ranges::views::iota(subres_range->base.layer,
                                            subres_range->base.layer + subres_range->extent.layers)
-                : std::views::iota(0u, info.resources.layers);
+                : std::views::iota(0u, host_layers);
 
         for (u32 mip : mips) {
             for (u32 layer : layers) {
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
-                const auto subres_idx = mip * info.resources.layers + layer;
+                const auto subres_idx = mip * host_layers + layer;
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 

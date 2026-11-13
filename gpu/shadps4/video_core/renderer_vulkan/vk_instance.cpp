@@ -377,6 +377,12 @@ bool Instance::CreateDevice() {
     }
     provoking_vertex = add_extension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
     shader_stencil_export = add_extension(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+#ifdef _WIN32
+    // resogun: stereo 3D woven for an SR panel by D3D11 (vk_sr_output.cpp): textures and a fence
+    // shared with D3D11.
+    external_win32 = add_extension("VK_KHR_external_memory_win32") &&
+                     add_extension("VK_KHR_external_semaphore_win32");
+#endif
     image_load_store_lod = add_extension(VK_AMD_SHADER_IMAGE_LOAD_STORE_LOD_EXTENSION_NAME);
     amd_gcn_shader = !amd_paths_off.shaderext && add_extension(VK_AMD_GCN_SHADER_EXTENSION_NAME);
     amd_shader_trinary_minmax =
@@ -484,7 +490,7 @@ bool Instance::CreateDevice() {
     std::array queue_infos = {queue_info, queue_info};
     queue_infos[1].queueFamilyIndex = sparse_queue_family_index;
 
-    const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
+    vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
@@ -529,6 +535,11 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceVulkan11Features{
             .storageBuffer16BitAccess = vk11_features.storageBuffer16BitAccess,
+            // resogun: stereo 3D in one pass (vk_stereo.h): both eyes drawn into the two layers
+            // of the scene targets by multiview.
+            .multiview = vk11_features.multiview,
+            .multiviewGeometryShader = vk11_features.multiviewGeometryShader,
+            .multiviewTessellationShader = vk11_features.multiviewTessellationShader,
             .shaderDrawParameters = vk11_features.shaderDrawParameters,
         },
         vk::PhysicalDeviceVulkan12Features{

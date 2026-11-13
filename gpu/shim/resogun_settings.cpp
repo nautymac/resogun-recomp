@@ -79,6 +79,21 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         }
     } else if (key == "audio_channels") {
         v.audio_channels = ParseAudioChannels(value);
+    } else if (key == "stereo") {
+        std::string lower;
+        for (const char c : value) lower += char(std::tolower(static_cast<unsigned char>(c)));
+        int mode = StereoOff;
+        for (int m = 0; m < StereoModeCount; ++m) {
+            if (lower == StereoModeKeys[m]) mode = m;
+        }
+        if (lower == "on" || lower == "1" || lower == "true" || lower == "geo") mode = StereoSr;
+        v.startup_stereo = v.stereo = mode;
+    } else if (key == "stereo_depth") {
+        v.stereo_depth = std::clamp(float(std::atof(value.c_str())), 0.0f, 10.0f);
+    } else if (key == "stereo_convergence") {
+        v.stereo_convergence = std::clamp(float(std::atof(value.c_str())), 0.01f, 100000.0f);
+    } else if (key == "stereo_swap") {
+        v.stereo_swap = Truthy(value);
     } else if (key == "render_resolution") {
         std::string lower;
         for (const char c : value) lower += char(std::tolower(static_cast<unsigned char>(c)));
@@ -89,6 +104,16 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else {
         std::printf("Settings: unknown key %s\n", key.c_str());
     }
+}
+
+// A setting's number as settings.ini holds it: up to three decimals, trailing zeros dropped.
+std::string Number(float value) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%.3f", value);
+    std::string s{text};
+    s.erase(s.find_last_not_of('0') + 1);
+    if (!s.empty() && s.back() == '.') s.pop_back();
+    return s;
 }
 
 std::vector<std::pair<std::string, std::string>> DisplayKeys() {
@@ -105,6 +130,10 @@ std::vector<std::pair<std::string, std::string>> DisplayKeys() {
         {"render_resolution", std::string(RenderResolutionKeys[std::clamp(v.render_resolution.load(), 0, RenderResolutionCount - 1)])},
         {"sharpening", v.sharpening ? "1" : "0"},
         {"hdr", v.hdr ? "1" : "0"},
+        {"stereo", std::string(StereoModeKeys[std::clamp(v.stereo.load(), 0, StereoModeCount - 1)])},
+        {"stereo_depth", Number(v.stereo_depth.load())},
+        {"stereo_convergence", Number(v.stereo_convergence.load())},
+        {"stereo_swap", v.stereo_swap ? "1" : "0"},
     };
 }
 
@@ -220,6 +249,9 @@ void Load() {
         {"RESOGUN_RENDER_RESOLUTION", "render_resolution"},
         {"RESOGUN_HDR", "hdr"},
         {"RESOGUN_SHARPENING", "sharpening"},
+        {"RESOGUN_STEREO", "stereo"},               {"RESOGUN_STEREO_DEPTH", "stereo_depth"},
+        {"RESOGUN_STEREO_CONVERGENCE", "stereo_convergence"},
+        {"RESOGUN_STEREO_SWAP", "stereo_swap"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -227,6 +259,18 @@ void Load() {
         }
     }
     v.startup_monitor = v.monitor;
+    if (v.startup_stereo != StereoOff) {
+        // The eyes are drawn into a second layer of the scene-sized targets (stereo.h), which
+        // knows the 16:9 1080p sizes; the 4K mode draws its scene as a 1920x2160 checkerboard.
+        if (v.startup_render_resolution != Render1080p) {
+            std::printf("Stereo 3D: rendering at 1080p (render_resolution=4k is kept for 2D)\n");
+            v.startup_render_resolution = Render1080p;
+        }
+        if (v.startup_aspect_ratio != Aspect16x9) {
+            std::printf("Stereo 3D: the picture is 16:9 (aspect_ratio is kept for 2D)\n");
+            v.startup_aspect_ratio = Aspect16x9;
+        }
+    }
     std::scoped_lock lock{save_mutex};
     saved_keys = DisplayKeys();
     CopyToSaveFolder();
@@ -253,6 +297,16 @@ double DisplayRefresh() {
         refresh.store(ResogunWindowRefreshRate(), std::memory_order_relaxed);
     }
     return refresh.load(std::memory_order_relaxed);
+}
+
+bool StereoLayers() {
+    static const bool layers = [] {
+        if (const char* env = std::getenv("RESOGUN_STEREO_LAYERS"); env && env[0]) {
+            return env[0] == '1';
+        }
+        return Get().startup_stereo != StereoOff;
+    }();
+    return layers;
 }
 
 int EffectiveFrameRate() {
@@ -290,6 +344,8 @@ extern "C" int resogun_hdr(void) {
 }
 
 extern "C" int resogun_width_4k(void) {
+    // resogun: stereo 3D draws the 16:9 picture (stereo.h knows its target sizes).
+    if (ResogunSettings::StereoLayers()) return 3840;
     return ResogunSettings::Get().startup_width_4k.load();
 }
 

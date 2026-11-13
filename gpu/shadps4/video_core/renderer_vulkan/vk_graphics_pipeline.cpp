@@ -297,6 +297,7 @@ GraphicsPipeline::GraphicsPipeline(
 
     const vk::PipelineRenderingCreateInfo pipeline_rendering_ci = {
         .pNext = instance.IsMixedDepthSamplesSupported() ? &mixed_samples : nullptr,
+        .viewMask = key.stereo ? 0b11u : 0u, // resogun: both eyes (RenderState::view_mask)
         .colorAttachmentCount = key.num_color_attachments,
         .pColorAttachmentFormats = color_formats.data(),
         .depthAttachmentFormat = key.z_format != AmdGpu::DepthBuffer::ZFormat::Invalid
@@ -430,6 +431,15 @@ GraphicsPipeline::GraphicsPipeline(
 
     const auto binary_directory = Common::FS::GetShaderCachePath(Common::ElfInfo::Instance().GameSerial()) /
         "pipeline-binaries";
+    // resogun diagnosis: RESOGUN_STEREO_LOG=3 names each stereo pipeline before the driver builds it.
+    static const bool stereo_log = [] {
+        const char* env = std::getenv("RESOGUN_STEREO_LOG");
+        return env && env[0] == '3';
+    }();
+    if (stereo_log && key.stereo) {
+        std::printf("Stereo 3D: building pipeline %s\n", debug_str.c_str());
+        std::fflush(stdout);
+    }
     auto [pipeline_result, pipe] =
         CreateCachedGraphicsPipeline(device, pipeline_cache, pipeline_info, key,
                                      instance.GetPipelineBinaryGlobalKey(), binary_directory);

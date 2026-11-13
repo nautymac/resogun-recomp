@@ -66,6 +66,46 @@ void ConvertPositionToClipSpace(EmitContext& ctx) {
     ctx.OpStore(ctx.output_position, vector);
 }
 
+// resogun: stereo 3D in one pass (stereo.h): the eye's clip-space shift x += sep * (w - conv),
+// the left eye (view 0) with the negative separation (dynamic3d's convention: far points move left
+// in the left eye). Screen-space geometry (w == 1: the HUD, full-screen passes) stays on the
+// screen plane.
+static void EmitStereoOffset(EmitContext& ctx) {
+    const Id f32 = ctx.F32[1];
+    const Id bool_type = ctx.U1[1];
+    const Id position = ctx.OpLoad(ctx.F32[4], ctx.output_position);
+    const Id x = ctx.OpCompositeExtract(f32, position, 0u);
+    const Id w = ctx.OpCompositeExtract(f32, position, 3u);
+    const Id sep = ctx.StereoParam(0u);
+    const Id conv = ctx.StereoParam(1u);
+    const Id right = ctx.OpINotEqual(bool_type, ctx.StereoLayer(), ctx.u32_zero_value);
+    const Id eye_sep = ctx.OpSelect(f32, right, sep, ctx.OpFNegate(f32, sep));
+    const Id shift = ctx.OpFMul(f32, eye_sep, ctx.OpFSub(f32, w, conv));
+    const Id flat = ctx.OpFOrdLessThan(
+        bool_type, ctx.OpFAbs(f32, ctx.OpFSub(f32, w, ctx.ConstF32(1.0f))), ctx.ConstF32(1e-5f));
+    const Id new_x = ctx.OpFAdd(f32, x, ctx.OpSelect(f32, flat, ctx.f32_zero_value, shift));
+    ctx.OpStore(ctx.output_position, ctx.OpCompositeInsert(ctx.F32[4], new_x, position, 0u));
+}
+
+// resogun: stereo 3D in one pass: the inverse of EmitStereoOffset for a fragment shader that
+// rebuilds positions from the scene depth as (s * z, t * z, z), s and t the texture coordinate of
+// the pixel and z the linear depth there: the eye's picture shows a point at
+// s_eye = s + 1/2 * eye_sep * (1 - conv / z), so the centre camera's s * z, which the game's
+// matrices expect, is s_eye * z - 1/2 * eye_sep * (z - conv).
+Id EmitStereoUnshiftX(EmitContext& ctx, Id sz, Id z) {
+    if (!Sirit::ValidId(ctx.view_index)) {
+        return sz;
+    }
+    const Id f32 = ctx.F32[1];
+    const Id sep = ctx.StereoParam(0u);
+    const Id conv = ctx.StereoParam(1u);
+    const Id right = ctx.OpINotEqual(ctx.U1[1], ctx.StereoLayer(), ctx.u32_zero_value);
+    const Id eye_sep = ctx.OpSelect(f32, right, sep, ctx.OpFNegate(f32, sep));
+    const Id shift =
+        ctx.OpFMul(f32, ctx.OpFMul(f32, eye_sep, ctx.ConstF32(0.5f)), ctx.OpFSub(f32, z, conv));
+    return ctx.OpFSub(f32, sz, shift);
+}
+
 void EmitEpilogue(EmitContext& ctx) {
     if (ctx.hw_stage == HwStage::Vertex &&
         ctx.runtime_info.hw.vs.emulate_depth_negative_one_to_one) {
@@ -73,6 +113,10 @@ void EmitEpilogue(EmitContext& ctx) {
     }
     if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_disable) {
         ConvertPositionToClipSpace(ctx);
+    }
+    if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.stereo &&
+        !ctx.runtime_info.hw.vs.clip_disable && Sirit::ValidId(ctx.view_index)) {
+        EmitStereoOffset(ctx); // resogun: stereo 3D in one pass
     }
 }
 
@@ -92,6 +136,9 @@ void EmitDiscardCond(EmitContext& ctx, Id condition) {
 }
 
 void EmitEmitVertex(EmitContext& ctx) {
+    if (ctx.runtime_info.hw.gs.stereo && Sirit::ValidId(ctx.view_index)) {
+        EmitStereoOffset(ctx); // resogun: stereo 3D in one pass
+    }
     ctx.OpEmitVertex();
 }
 
