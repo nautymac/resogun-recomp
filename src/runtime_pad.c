@@ -468,6 +468,52 @@ static void title_press(PadData *d) {
     if (t>=1000000 && (t-1000000)%500000<100000) d->buttons|=BTN_CROSS;
 }
 
+/* 3D from the pad while it is on (gpu/resogun_gpu.h): with L1+R1 held, D-pad Left/Right steps the
+ * depth and Up/Down the convergence, repeated while held; the values are saved when both are let go.
+ * The game sees neither shoulder nor the D-pad meanwhile (a direction still held afterwards stays
+ * hidden until released). A lone shoulder reaches the game STEREO_JOIN_US late, the time to press
+ * the other one; a tap shorter than that still arrives, as a STEREO_TAP_US press. Called with the
+ * pad lock held. */
+enum { STEREO_JOIN_US=60000, STEREO_TAP_US=50000, STEREO_REPEAT_FIRST_US=400000, STEREO_REPEAT_US=150000 };
+static void stereo_combo(PadData *d) {
+    static uint64_t lone_since, tap_until, next_repeat;
+    static uint32_t lone, tap, last_dir, dpad_hold;
+    static bool active, changed;
+    const uint32_t pair=BTN_L1|BTN_R1, dpad=BTN_UP|BTN_DOWN|BTN_LEFT|BTN_RIGHT;
+    dpad_hold&=d->buttons;
+    d->buttons&=~dpad_hold;
+    if (!active && !lone && !tap && !resogun_gpu_stereo_available()) return;
+    const uint64_t now=now_us();
+    const uint32_t shoulders=d->buttons&pair, held=d->buttons&dpad;
+    if (shoulders==pair || (active && shoulders)) {
+        if (!active) { active=true; last_dir=0; }
+        lone=tap=0;
+        d->buttons&=~(pair|dpad);
+        if (shoulders!=pair) return;
+        const uint32_t dir=held&(0u-held);
+        if (!dir) { last_dir=0; return; }
+        if (dir!=last_dir) { last_dir=dir; next_repeat=now+STEREO_REPEAT_FIRST_US; }
+        else if (now<next_repeat) return;
+        else next_repeat=now+STEREO_REPEAT_US;
+        resogun_gpu_stereo_adjust(dir==BTN_RIGHT ? 1 : dir==BTN_LEFT ? -1 : 0, dir==BTN_UP ? 1 : dir==BTN_DOWN ? -1 : 0);
+        changed=true;
+        return;
+    }
+    if (active) {
+        active=false; dpad_hold=held; d->buttons&=~held;
+        if (changed) { changed=false; resogun_gpu_stereo_save(); }
+    }
+    if (shoulders) {
+        if (shoulders!=lone) { lone=shoulders; lone_since=now; }
+        if (now-lone_since<STEREO_JOIN_US) d->buttons&=~shoulders;
+        return;
+    }
+    if (lone && now-lone_since<STEREO_JOIN_US) { tap=lone; tap_until=now+STEREO_TAP_US; }
+    lone=0;
+    if (tap && now<tap_until) d->buttons|=tap;
+    else tap=0;
+}
+
 /* After a dialog closes, buttons still held (the Cross that accepted a name) stay hidden until
  * released: the game would take them as a new press. */
 static int hold_after_capture;
@@ -490,6 +536,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    stereo_combo(d);
     title_back(d);
     play_click(d);
     title_press(d);

@@ -82,6 +82,11 @@ unsigned long long resogun_gpu_copy_yields(void);
 unsigned long long resogun_gpu_flips(void);
 /* A notice in the corner for `milliseconds` (any thread; the runtime's messages to the player). */
 void resogun_gpu_notice(const char *text, int milliseconds);
+/* 3D adjustment from the pad (L1+R1 with the D-pad): available while 3D is on; adjust steps the
+ * depth (0.1 each) and the convergence (x1.1 each) and shows the values; save writes settings.ini. */
+int resogun_gpu_stereo_available(void);
+void resogun_gpu_stereo_adjust(int depth_steps, int convergence_steps);
+void resogun_gpu_stereo_save(void);
 /* Trophy unlocked (any thread): its name as a notice in the corner. The other arguments are kept
  * for the runtime's call: id, description and PNG icon. */
 void resogun_gpu_toast_trophy(int id, const char *title, const char *detail, const unsigned char *png,

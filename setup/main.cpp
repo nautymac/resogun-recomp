@@ -949,9 +949,10 @@ LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
                     InvalidateRect(h, nullptr, FALSE);
                 RECT row = rect(kRowLeft, kStereoY, kRowRight - kRowLeft, 34);
                 InvalidateRect(wnd, &row, FALSE);
-                if (setup::ready(ui.root))
-                    set_status(L"Press Install to save the 3D choice (the game keeps it in settings.ini).");
             }
+            // Saved at once, like the Game settings page: Play Game right after it starts in this mode
+            // (Install writes it as well).
+            save_settings({{L"stereo", setup::kStereoModes[mode]}});
             return 0;
         }
         case kGameBrowse:

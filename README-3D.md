@@ -21,16 +21,17 @@
 | To do | How |
 |---|---|
 | Play | `resogun.exe` or the desktop shortcut — it starts in the 3D mode chosen in the setup |
-| Change the mode, or back to 2D | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side → **Install** |
+| Change the mode, or back to 2D | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side — saved at once, the next start uses it |
 | Game settings (window, FPS, VSync, resolution, HDR, speakers, 3D depth) | `resogun-setup.exe` → **Game settings** — each choice is saved at once; **Back** returns |
 | 3D on/off while playing | **Ctrl+F3** (between the setup's mode and off) |
 | Less / more depth | **Ctrl+F5 / Ctrl+F6** (0.1 per press) |
 | Scene forward / back | **Ctrl+F7 / Ctrl+F8** (convergence ÷1.1 / ×1.1) |
 | Swap the eyes | **Ctrl+F9** |
+| Depth and convergence on the gamepad | Hold **L1 + R1** and press the D-pad: **← / →** less / more depth, **↑ / ↓** scene back / forward. Held, it repeats |
 
-Each key shows the new values at the top of the picture and saves them at once.
+Each key shows the new values at the top of the picture and saves them at once (L1 + R1: when you let go of them). While L1 + R1 are held the game gets neither of them nor the D-pad; a single L1 or R1 reaches the game 0.06 s late, the time to press the other one.
 
-**Getting it comfortable:** start with the defaults (depth 1, convergence 60). At 60 the ship and the HUD sit at the screen's depth and the city is behind it. If your eyes strain or things look doubled, lower the depth (Ctrl+F5). Lower convergence (Ctrl+F7) brings the whole scene out of the screen; higher (Ctrl+F8) pushes it in. If near things go in and far things come out, swap the eyes (Ctrl+F9).
+**Getting it comfortable:** start with the defaults (depth 1, convergence 60). At 60 the ship and the HUD sit at the screen's depth and the city is behind it. If your eyes strain or things look doubled, lower the depth (Ctrl+F5, or L1 + R1 + ←). Lower convergence (Ctrl+F7, or L1 + R1 + ↓) brings the whole scene out of the screen; higher (Ctrl+F8, or L1 + R1 + ↑) pushes it in. If near things go in and far things come out, swap the eyes (Ctrl+F9).
 
 ### Settings (settings.ini)
 
@@ -83,16 +84,17 @@ Source: this branch (`stereo-3d`), GPL-2.0-or-later like the original.
 | 하려는 것 | 방법 |
 |---|---|
 | 게임 시작 | `resogun.exe` 또는 바탕화면 바로가기 — 셋업에서 고른 3D 방식으로 시작 |
-| 방식 바꾸기, 2D로 돌아가기 | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side → **Install** |
+| 방식 바꾸기, 2D로 돌아가기 | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side — 고르면 바로 저장, 다음 실행부터 적용 |
 | 게임 설정 (창 모드, FPS, VSync, 해상도, HDR, 스피커, 3D 깊이) | `resogun-setup.exe` → **Game settings** — 고르면 바로 저장, **Back** 으로 돌아감 |
 | 게임 중 3D 켜기/끄기 | **Ctrl+F3** (셋업에서 고른 방식 ↔ 끔) |
 | 깊이 줄이기 / 늘리기 | **Ctrl+F5 / Ctrl+F6** (한 번에 0.1) |
 | 장면을 앞으로 / 뒤로 | **Ctrl+F7 / Ctrl+F8** (수렴 ÷1.1 / ×1.1) |
 | 왼쪽·오른쪽 눈 바꾸기 | **Ctrl+F9** |
+| 게임패드로 깊이·수렴 조절 | **L1 + R1** 을 누른 채 십자키: **← / →** 깊이 줄이기 / 늘리기, **↑ / ↓** 장면을 뒤로 / 앞으로. 누르고 있으면 반복 |
 
-키를 누르면 바뀐 값이 화면 위에 잠깐 뜨고 바로 저장됩니다.
+키를 누르면 바뀐 값이 화면 위에 잠깐 뜨고 바로 저장됩니다(L1 + R1 은 손을 뗄 때 저장). L1 + R1 을 누르고 있는 동안 게임에는 두 버튼과 십자키가 가지 않습니다. L1 이나 R1 하나만 누르면 다른 쪽을 누를 시간(0.06초)만큼 늦게 게임에 갑니다.
 
-**편하게 맞추기:** 기본값(깊이 1, 수렴 60)으로 시작합니다. 수렴 60 이면 기체와 HUD 가 화면 깊이에 오고 도시는 화면 뒤에 있습니다. 눈이 피곤하거나 겹쳐 보이면 깊이를 줄입니다(Ctrl+F5). 수렴을 낮추면(Ctrl+F7) 장면 전체가 화면 밖으로 나오고, 높이면(Ctrl+F8) 안으로 들어갑니다. 가까운 것이 들어가고 먼 것이 나와 보이면 눈을 바꿉니다(Ctrl+F9).
+**편하게 맞추기:** 기본값(깊이 1, 수렴 60)으로 시작합니다. 수렴 60 이면 기체와 HUD 가 화면 깊이에 오고 도시는 화면 뒤에 있습니다. 눈이 피곤하거나 겹쳐 보이면 깊이를 줄입니다(Ctrl+F5, 또는 L1 + R1 + ←). 수렴을 낮추면(Ctrl+F7, 또는 L1 + R1 + ↓) 장면 전체가 화면 밖으로 나오고, 높이면(Ctrl+F8, 또는 L1 + R1 + ↑) 안으로 들어갑니다. 가까운 것이 들어가고 먼 것이 나와 보이면 눈을 바꿉니다(Ctrl+F9).
 
 ### 설정 (settings.ini)
 

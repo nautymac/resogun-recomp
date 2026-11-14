@@ -1126,6 +1126,38 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     initialized = true;
 }
 
+// resogun: one step of 3D depth (0.1, 0..10) and of convergence (x1.1, 0.01..100000) per unit of
+// the arguments, by the keys and by the pad (L1+R1 with the D-pad, src/runtime_pad.c).
+static void StereoStep(int depth_steps, int convergence_steps) {
+    auto& s = ResogunSettings::Get();
+    for (; depth_steps > 0; --depth_steps) {
+        s.stereo_depth = std::min(10.0f, std::round((s.stereo_depth + 0.1f) * 100.0f) / 100.0f);
+    }
+    for (; depth_steps < 0; ++depth_steps) {
+        s.stereo_depth = std::max(0.0f, std::round((s.stereo_depth - 0.1f) * 100.0f) / 100.0f);
+    }
+    for (; convergence_steps > 0; --convergence_steps) {
+        s.stereo_convergence = std::min(100000.0f, s.stereo_convergence * 1.1f);
+    }
+    for (; convergence_steps < 0; ++convergence_steps) {
+        s.stereo_convergence = std::max(0.01f, s.stereo_convergence / 1.1f);
+    }
+}
+
+// resogun: the 3D values as a notice at the top of the picture and a log line.
+static void StereoNotice() {
+    const auto& s = ResogunSettings::Get();
+    char text[160];
+    if (s.stereo == ResogunSettings::StereoOff) {
+        std::snprintf(text, sizeof text, "3D: off (Ctrl+F3 turns it on)");
+    } else {
+        std::snprintf(text, sizeof text, "3D: depth %.2f%%  convergence %.2f%s", s.stereo_depth.load(),
+                      s.stereo_convergence.load(), s.stereo_swap ? "  eyes swapped" : "");
+    }
+    std::printf("Stereo 3D: %s\n", text + 4);
+    ShowNotice(text, 2500);
+}
+
 // resogun: stereo 3D keys, menus open or not: Ctrl+F3 on/off (between the mode 3D started with and
 // off), Ctrl+F5/F6 depth, Ctrl+F7/F8 convergence, Ctrl+F9 eyes swapped. Each change is shown and
 // saved to settings.ini at once. A held key repeats at most ~6 times a second; F3 and F9 once.
@@ -1157,16 +1189,16 @@ static bool StereoKey(const SDL_Event& event) {
         s.stereo = s.stereo == ResogunSettings::StereoOff ? s.startup_stereo : ResogunSettings::StereoOff;
         break;
     case SDLK_F5:
-        s.stereo_depth = std::max(0.0f, std::round((s.stereo_depth - 0.1f) * 100.0f) / 100.0f);
+        StereoStep(-1, 0);
         break;
     case SDLK_F6:
-        s.stereo_depth = std::min(10.0f, std::round((s.stereo_depth + 0.1f) * 100.0f) / 100.0f);
+        StereoStep(1, 0);
         break;
     case SDLK_F7:
-        s.stereo_convergence = std::max(0.01f, s.stereo_convergence / 1.1f);
+        StereoStep(0, -1);
         break;
     case SDLK_F8:
-        s.stereo_convergence = std::min(100000.0f, s.stereo_convergence * 1.1f);
+        StereoStep(0, 1);
         break;
     case SDLK_F9:
         s.stereo_swap = !s.stereo_swap;
@@ -1174,15 +1206,7 @@ static bool StereoKey(const SDL_Event& event) {
     default:
         break;
     }
-    char text[160];
-    if (s.stereo == ResogunSettings::StereoOff) {
-        std::snprintf(text, sizeof text, "3D: off (Ctrl+F3 turns it on)");
-    } else {
-        std::snprintf(text, sizeof text, "3D: depth %.2f%%  convergence %.2f%s", s.stereo_depth.load(),
-                      s.stereo_convergence.load(), s.stereo_swap ? "  eyes swapped" : "");
-    }
-    std::printf("Stereo 3D: %s\n", text + 4);
-    ShowNotice(text, 2500);
+    StereoNotice();
     ResogunSettings::SaveDisplay();
     return true;
 }
@@ -1445,6 +1469,20 @@ extern "C" void resogun_gpu_notice(const char* text, int milliseconds) {
     if (text && text[0]) {
         ResogunOverlay::ShowNotice(text, milliseconds);
     }
+}
+
+// The pad's 3D adjustment (src/runtime_pad.c, L1+R1 held): only while 3D is on.
+extern "C" int resogun_gpu_stereo_available(void) {
+    return ResogunSettings::StereoLayers() && ResogunSettings::Get().stereo != ResogunSettings::StereoOff;
+}
+
+extern "C" void resogun_gpu_stereo_adjust(int depth_steps, int convergence_steps) {
+    ResogunOverlay::StereoStep(depth_steps, convergence_steps);
+    ResogunOverlay::StereoNotice();
+}
+
+extern "C" void resogun_gpu_stereo_save(void) {
+    ResogunSettings::SaveDisplay();
 }
 
 // Called by the runtime (src/runtime_services.c) when the game unlocks a trophy: its name as a
