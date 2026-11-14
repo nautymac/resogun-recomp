@@ -604,6 +604,38 @@ int stereo_mode(const fs::path& root, const fs::path& save) {
     }
 }
 
+std::optional<std::wstring> game_setting(const fs::path& root, const fs::path& save, const std::wstring& key) {
+    std::error_code ec;
+    fs::path ini = save.empty() ? fs::path() : save / L"settings.ini";
+    if (ini.empty() || !fs::is_regular_file(ini, ec))
+        ini = root / L"settings.ini";
+    try {
+        return read_setting(ini, key);
+    } catch (const Error&) {
+        return std::nullopt;
+    }
+}
+
+void set_game_settings(const fs::path& root, const fs::path& save,
+                       const std::vector<std::pair<std::wstring, std::wstring>>& values) {
+    std::error_code ec;
+    fs::path settings = root / L"settings.ini";
+    std::vector<fs::path> files;
+    if (fs::is_regular_file(settings, ec))
+        files.push_back(settings);
+    if (!save.empty() && fs::is_regular_file(save / L"settings.ini", ec) && !same_path(save / L"settings.ini", settings))
+        files.push_back(save / L"settings.ini");
+    if (files.empty()) {
+        fs::path example = root / L"prepare" / L"settings.example.ini";
+        if (!fs::is_regular_file(example, ec) || !fs::copy_file(example, settings, ec))
+            write_text(settings, "");
+        files.push_back(settings);
+    }
+    for (const fs::path& ini : files)
+        for (const auto& [key, value] : values)
+            write_setting(ini, key, value);
+}
+
 bool has_saves(const fs::path& save) {
     std::error_code ec;
     fs::path data = save / L"savedata";

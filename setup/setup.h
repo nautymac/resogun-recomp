@@ -93,6 +93,15 @@ constexpr const wchar_t* kStereoModes[] = {L"off", L"sr", L"sbs"};
 // settings.ini stereo as the game reads it (the save folder's file, else the release folder's), as
 // an index into kStereoModes; 0 (off) when unset.
 int stereo_mode(const std::filesystem::path& root, const std::filesystem::path& save);
+// A settings.ini key as the game reads it: from the save folder's file when there is one, else the
+// release folder's; unset when that file lacks it.
+std::optional<std::wstring> game_setting(const std::filesystem::path& root, const std::filesystem::path& save,
+                                         const std::wstring& key);
+// Writes settings.ini keys into the files the game reads: the save folder's and the release folder's
+// (those that exist; the release folder's is made from prepare/settings.example.ini when neither
+// does). Throws Error.
+void set_game_settings(const std::filesystem::path& root, const std::filesystem::path& save,
+                       const std::vector<std::pair<std::wstring, std::wstring>>& values);
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b);
 
 // Sets up opt.root, reporting each step through `log`. Throws Error. Returns the game exe's path.

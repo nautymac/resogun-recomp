@@ -21,6 +21,9 @@
 #include <shellapi.h>
 #include <shobjidl.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cwctype>
 #include <memory>
 #include <cwchar>
 #include <string>
@@ -183,7 +186,11 @@ enum : int {
     kSkipIntro,
     kStereo, // kStereo + i: setup::kStereoModes[i]
     kStereoLast = kStereo + 2,
+    kPage,     // Game settings / Back
+    kSizeEdit, // the window size on the Game settings page
 };
+// The Game settings page's buttons: kSettingBase + row * 16 + the option (or -, +, the right button).
+constexpr int kSettingBase = 400;
 enum : UINT {
     kMsgLog = WM_APP + 1, // lParam: std::wstring* line
     kMsgDone,             // wParam: 1 ok; lParam: std::wstring* exe path or error
@@ -212,6 +219,10 @@ struct Ui {
     HWND wnd = nullptr, play = nullptr, install = nullptr, exit = nullptr, skip_intro = nullptr;
     HWND stereo[3] = {}; // the 3D choices (setup::kStereoModes)
     int stereo_mode = 0;
+    HWND page_button = nullptr;
+    int page = 0; // 0 the install, 1 Game settings
+    std::wstring install_status; // the install page's status while Game settings shows
+    bool install_status_bad = false;
     Folder game{L"Game folder", 66}, dlc{L"Extra DLC folder (optional)", 146}, save{L"Save folder", 226};
     std::vector<HWND> inputs; // disabled while installing (Play Game too, and until the folder is set up)
     HFONT font = nullptr, bold = nullptr, title = nullptr;
@@ -311,17 +322,103 @@ void paint_folder(HDC dc, const Folder& f) {
     frame(dc, box, color::RowEdge);
 }
 
-void paint(HDC dc) {
-    RECT client;
-    GetClientRect(ui.wnd, &client);
-    fill(dc, client, color::Back);
-    // The panel and its title tab, as the Display Settings page draws them.
-    RECT panel = rect(20, kPanelTop, kWidth - 40, kPanelBottom - kPanelTop);
-    fill(dc, panel, color::Panel);
-    frame(dc, panel, color::Frame, px(2));
-    RECT tab = rect(kWidth / 2 - 140, 12, 280, 42);
-    shape(dc, tab, px(12), color::Tab, color::Panel, color::Frame, px(2));
-    text(dc, L"RESOGUN SETUP", tab, ui.title, color::Text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+// --- the Game settings page ---
+// The game's settings.ini keys (gpu/shim/resogun_settings.cpp) as rows of choices like the 3D row; a
+// click saves at once to the files the game reads (setup::set_game_settings). The in-game Display
+// Settings (F10) and the 3D keys change the same lines.
+
+struct Option {
+    const wchar_t* label;
+    const wchar_t* value;
+};
+struct SettingRow {
+    const wchar_t* label;
+    const wchar_t* key;          // settings.ini key; vsync's row sets vsync and tearing
+    std::vector<Option> options; // none: the window size field, or a 3D number with - and +
+    const wchar_t* fallback;     // what the game takes when the key is unset
+    std::vector<HWND> buttons;
+    int chosen = 0;
+};
+enum : int {
+    kRowMode, kRowAspect, kRowSize, kRowFps, kRowVsync, kRowRender, kRowSharpen, kRowHdr, kRowAudio,
+    kRowDepth, kRowConvergence, kSettingRows
+};
+std::vector<SettingRow> settings = {
+    {L"Window mode", L"display_mode", {{L"Windowed", L"windowed"}, {L"Borderless", L"borderless"}, {L"Fullscreen", L"fullscreen"}}, L"borderless"},
+    {L"Aspect ratio", L"aspect_ratio", {{L"4:3", L"4:3"}, {L"16:9", L"16:9"}, {L"16:10", L"16:10"}, {L"21:9", L"21:9"}, {L"32:9", L"32:9"}}, L"16:9"},
+    {L"Window size", L"output_resolution", {}, L"1920x1080"},
+    {L"Max FPS", L"frame_rate", {{L"30", L"30"}, {L"60", L"60"}, {L"90", L"90"}, {L"120", L"120"}, {L"144", L"144"}, {L"180", L"180"}}, L"60"},
+    {L"VSync", L"vsync", {{L"On", L"on"}, {L"Off", L"off"}, {L"Off, tearing", L"tearing"}}, L"on"},
+    {L"Render resolution", L"render_resolution", {{L"1080p", L"1080p"}, {L"4K", L"4k"}}, L"4k"},
+    {L"Sharpening", L"sharpening", {{L"On", L"1"}, {L"Off", L"0"}}, L"1"},
+    {L"HDR", L"hdr", {{L"Off", L"0"}, {L"On", L"1"}}, L"0"},
+    {L"Speakers", L"audio_channels", {{L"Auto", L"auto"}, {L"Stereo", L"stereo"}, {L"5.1", L"5.1"}, {L"7.1", L"7.1"}}, L"auto"},
+    {L"3D depth", L"stereo_depth", {}, L"1"},
+    {L"3D convergence", L"stereo_convergence", {}, L"60"},
+};
+float stereo_depth = 1.0f, stereo_convergence = 60.0f;
+bool stereo_swap = false;
+HWND size_edit = nullptr;
+bool loading_settings = false; // the size field set from the file is not a change to save
+
+// One bar per row, the choices on its right (96-dpi units).
+constexpr int kSetTop = 54, kSetPitch = 34, kSetHeight = 31, kChoicesLeft = 214, kChoicesRight = 588;
+
+int setting_id(int row, int index) {
+    return kSettingBase + row * 16 + index;
+}
+
+bool setting_control(int id, int& row, int& index) {
+    if (id < kSettingBase || id >= kSettingBase + kSettingRows * 16)
+        return false;
+    row = (id - kSettingBase) / 16;
+    index = (id - kSettingBase) % 16;
+    return true;
+}
+
+// The highlighted buttons: each row's choice, and Swap eyes while on.
+bool setting_selected(int row, int index) {
+    if (row == kRowDepth)
+        return index == 2 && stereo_swap;
+    if (row == kRowSize || row == kRowConvergence)
+        return false;
+    return index == settings[row].chosen;
+}
+
+// A number as the game writes it: up to three decimals, trailing zeros dropped.
+std::wstring number(float v) {
+    wchar_t t[32];
+    swprintf(t, 32, L"%.3f", v);
+    std::wstring s = t;
+    s.erase(s.find_last_not_of(L'0') + 1);
+    if (!s.empty() && s.back() == L'.')
+        s.pop_back();
+    return s;
+}
+
+void paint_settings(HDC dc) {
+    for (int i = 0; i < kSettingRows; ++i) {
+        const int y = kSetTop + i * kSetPitch;
+        shape(dc, rect(kRowLeft, y, kRowRight - kRowLeft, kSetHeight), px(6), color::RowTop, color::RowBottom,
+              color::RowEdge);
+        text(dc, settings[i].label, rect(kRowLeft + 18, y, kChoicesLeft - kRowLeft - 22, kSetHeight), ui.bold,
+             color::Text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (i == kRowSize) {
+            RECT box = rect(kChoicesLeft, y + 3, 130, kSetHeight - 6);
+            fill(dc, box, color::Field);
+            frame(dc, box, color::RowEdge);
+            text(dc, L"Windowed only (width x height)", rect(kChoicesLeft + 140, y, kChoicesRight - kChoicesLeft - 140, kSetHeight),
+                 ui.font, color::Help, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else if (i == kRowDepth || i == kRowConvergence) {
+            const std::wstring value = i == kRowDepth ? number(stereo_depth) + L" %" : number(stereo_convergence);
+            text(dc, value, rect(kChoicesLeft + 36, y, 72, kSetHeight), ui.bold, color::Text,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+}
+
+// The install page: the three folders and the 3D row.
+void paint_install(HDC dc) {
     for (const Folder* f : {&ui.game, &ui.dlc, &ui.save})
         paint_folder(dc, *f);
     // The 3D row: its choice buttons and what the chosen one does.
@@ -337,6 +434,25 @@ void paint(HDC dc) {
                                                 : L"For a 3D TV or monitor in SBS mode";
     text(dc, note, rect(kFieldLeft + 240, kStereoY + 8, kRowRight - 20 - kFieldLeft - 240, 24), ui.font,
          no_bridge ? color::Bad : color::Good, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void paint(HDC dc) {
+    RECT client;
+    GetClientRect(ui.wnd, &client);
+    fill(dc, client, color::Back);
+    // The panel and its title tab, as the Display Settings page draws them.
+    RECT panel = rect(20, kPanelTop, kWidth - 40, kPanelBottom - kPanelTop);
+    fill(dc, panel, color::Panel);
+    frame(dc, panel, color::Frame, px(2));
+    RECT tab = rect(kWidth / 2 - 140, 12, 280, 42);
+    shape(dc, tab, px(12), color::Tab, color::Panel, color::Frame, px(2));
+    text(dc, ui.page == 1 ? L"GAME SETTINGS" : L"RESOGUN SETUP", tab, ui.title, color::Text,
+         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (ui.page == 1) {
+        paint_settings(dc);
+    } else {
+        paint_install(dc);
+    }
     text(dc, ui.status, rect(24, kPanelBottom + 10, kWidth - 48, kButtonsTop - kPanelBottom - 16), ui.font,
          ui.status_bad ? color::Bad : color::Help, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
 }
@@ -346,7 +462,9 @@ void paint(HDC dc) {
 void draw_button(const DRAWITEMSTRUCT& d) {
     HDC dc = d.hDC;
     RECT r = d.rcItem;
-    const bool choice = d.CtlID >= kStereo && d.CtlID <= kStereoLast; // a 3D choice
+    int setting_row = 0, setting_index = 0;
+    const bool setting = setting_control(int(d.CtlID), setting_row, setting_index);
+    const bool choice = (d.CtlID >= kStereo && d.CtlID <= kStereoLast) || setting; // on a row's gradient
     fill(dc, r, d.hwndItem == ui.skip_intro ? color::Panel : d.CtlID == kGameBrowse || d.CtlID == kDlcBrowse ||
                                                                  d.CtlID == kSaveBrowse || choice
                                                              ? color::RowBottom
@@ -372,8 +490,11 @@ void draw_button(const DRAWITEMSTRUCT& d) {
         text(dc, label, t, ui.font, disabled ? color::Dim : color::Help, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    bool primary = choice ? int(d.CtlID) - kStereo == ui.stereo_mode
-                          : d.hwndItem == (setup::ready(ui.root) && !IsWindowEnabled(ui.install) ? ui.play : ui.install);
+    bool primary = setting ? setting_selected(setting_row, setting_index)
+                   : choice  ? int(d.CtlID) - kStereo == ui.stereo_mode
+                   : d.hwndItem == ui.page_button
+                       ? false
+                       : d.hwndItem == (setup::ready(ui.root) && !IsWindowEnabled(ui.install) ? ui.play : ui.install);
     COLORREF top = disabled ? color::OffTop : primary ? color::FocusTop : color::RowTop;
     COLORREF bottom = disabled ? color::OffBottom : primary ? color::FocusBottom : color::RowBottom;
     if (pressed)
@@ -427,6 +548,161 @@ void set_busy(bool busy) {
         EnableWindow(h, !busy);
     EnableWindow(ui.play, !busy && setup::ready(ui.root));
     validate();
+}
+
+// --- the Game settings page: reading, saving, switching ---
+
+fs::path settings_save() {
+    std::wstring s = text_of(ui.save.edit);
+    return s.empty() ? setup::default_save() : fs::path(s);
+}
+
+std::wstring lower_text(std::wstring s) {
+    for (wchar_t& c : s)
+        c = static_cast<wchar_t>(std::towlower(c));
+    return s;
+}
+
+bool truthy(const std::wstring& v) {
+    const std::wstring l = lower_text(v);
+    return l == L"1" || l == L"true" || l == L"yes" || l == L"on";
+}
+
+// The rows from the settings.ini the game reads (the save folder named on the install page).
+void load_settings() {
+    const fs::path save = settings_save();
+    auto get = [&](const wchar_t* key, const wchar_t* fallback) {
+        std::optional<std::wstring> v = setup::game_setting(ui.root, save, key);
+        return lower_text(v && !v->empty() ? *v : std::wstring(fallback));
+    };
+    for (int i = 0; i < kSettingRows; ++i) {
+        SettingRow& row = settings[i];
+        if (row.options.empty())
+            continue;
+        std::wstring v;
+        if (i == kRowVsync) {
+            v = truthy(get(L"vsync", L"1")) ? L"on" : truthy(get(L"tearing", L"0")) ? L"tearing" : L"off";
+        } else {
+            v = get(row.key, row.fallback);
+            if (i == kRowSharpen || i == kRowHdr)
+                v = truthy(v) ? L"1" : L"0";
+            if (i == kRowRender && v == L"2160p")
+                v = L"4k";
+            if (i == kRowAudio)
+                v = v == L"2.0" || v == L"2" ? L"stereo" : v == L"6" ? L"5.1" : v == L"8" ? L"7.1" : v;
+        }
+        int found = -1, fallback = 0;
+        for (size_t o = 0; o < row.options.size(); ++o) {
+            if (v == row.options[o].value)
+                found = int(o);
+            if (lower_text(row.fallback) == row.options[o].value)
+                fallback = int(o);
+        }
+        row.chosen = found >= 0 ? found : fallback; // an unknown value: the game takes its default too
+    }
+    const float depth = float(_wtof(get(L"stereo_depth", L"1").c_str()));
+    const float convergence = float(_wtof(get(L"stereo_convergence", L"60").c_str()));
+    stereo_depth = std::clamp(depth, 0.0f, 10.0f);
+    stereo_convergence = convergence > 0.0f ? std::clamp(convergence, 0.01f, 100000.0f) : 60.0f;
+    stereo_swap = truthy(get(L"stereo_swap", L"0"));
+    loading_settings = true;
+    SetWindowTextW(size_edit, get(L"output_resolution", L"1920x1080").c_str());
+    loading_settings = false;
+    for (const SettingRow& row : settings)
+        for (HWND b : row.buttons)
+            InvalidateRect(b, nullptr, FALSE);
+}
+
+void save_settings(const std::vector<std::pair<std::wstring, std::wstring>>& values) {
+    try {
+        setup::set_game_settings(ui.root, settings_save(), values);
+        std::wstring what;
+        for (const auto& [key, value] : values)
+            what += (what.empty() ? L"" : L", ") + key + L"=" + value;
+        set_status(L"Saved in settings.ini: " + what);
+    } catch (const setup::Error& e) {
+        set_status(e.message, true);
+    }
+}
+
+void choose_setting(int row, int index) {
+    if (row == kRowDepth || row == kRowConvergence) {
+        if (row == kRowDepth && index < 2)
+            stereo_depth = std::clamp(std::round((stereo_depth + (index ? 0.1f : -0.1f)) * 100.0f) / 100.0f, 0.0f, 10.0f);
+        if (row == kRowConvergence && index < 2)
+            stereo_convergence = std::clamp(index ? stereo_convergence * 1.1f : stereo_convergence / 1.1f, 0.01f, 100000.0f);
+        if (row == kRowDepth && index == 2)
+            stereo_swap = !stereo_swap;
+        if (row == kRowConvergence && index == 2) { // Defaults
+            stereo_depth = 1.0f;
+            stereo_convergence = 60.0f;
+        }
+        RECT area = rect(kRowLeft, kSetTop + kRowDepth * kSetPitch, kRowRight - kRowLeft, 2 * kSetPitch);
+        InvalidateRect(ui.wnd, &area, FALSE);
+        for (HWND b : settings[kRowDepth].buttons)
+            InvalidateRect(b, nullptr, FALSE);
+        save_settings({{L"stereo_depth", number(stereo_depth)},
+                       {L"stereo_convergence", number(stereo_convergence)},
+                       {L"stereo_swap", stereo_swap ? L"1" : L"0"}});
+        return;
+    }
+    SettingRow& r = settings[row];
+    if (index < 0 || index >= int(r.options.size()))
+        return;
+    r.chosen = index;
+    for (HWND b : r.buttons)
+        InvalidateRect(b, nullptr, FALSE);
+    if (row == kRowVsync) {
+        const std::wstring v = r.options[index].value;
+        save_settings({{L"vsync", v == L"on" ? L"1" : L"0"}, {L"tearing", v == L"tearing" ? L"1" : L"0"}});
+    } else {
+        save_settings({{r.key, r.options[index].value}});
+    }
+}
+
+// The window size field: saved once it reads as a size.
+void size_changed() {
+    if (loading_settings)
+        return;
+    const std::wstring s = text_of(size_edit);
+    int w = 0, h = 0;
+    wchar_t x = 0;
+    if (swscanf(s.c_str(), L"%d%lc%d", &w, &x, &h) == 3 && (x == L'x' || x == L'X') && w >= 640 && h >= 360 &&
+        w <= 15360 && h <= 8640)
+        save_settings({{L"output_resolution", std::to_wstring(w) + L"x" + std::to_wstring(h)}});
+    else
+        set_status(L"Window size: width x height, as 1920x1080.", true);
+}
+
+void show_page(int page) {
+    if (page == ui.page)
+        return;
+    if (page == 1) {
+        ui.install_status = ui.status;
+        ui.install_status_bad = ui.status_bad;
+        load_settings();
+    }
+    ui.page = page;
+    const int install = page == 0 ? SW_SHOW : SW_HIDE, game = page == 1 ? SW_SHOW : SW_HIDE;
+    for (const Folder* f : {&ui.game, &ui.dlc, &ui.save}) {
+        ShowWindow(f->edit, install);
+        ShowWindow(f->browse, install);
+    }
+    for (HWND h : ui.stereo)
+        ShowWindow(h, install);
+    ShowWindow(ui.skip_intro, install);
+    ShowWindow(ui.install, install);
+    for (const SettingRow& row : settings)
+        for (HWND b : row.buttons)
+            ShowWindow(b, game);
+    ShowWindow(size_edit, game);
+    SetWindowTextW(ui.page_button, page == 0 ? L"Game settings" : L"Back");
+    if (page == 1)
+        set_status(L"Each choice is saved in settings.ini at once; the game reads it when it starts. "
+                   L"3D renders at 1080p in 16:9 whatever these say.");
+    else
+        set_status(ui.install_status, ui.install_status_bad);
+    InvalidateRect(ui.wnd, nullptr, FALSE);
 }
 
 // Starts the game as a double-click would (its own folder, no console), then closes the setup.
@@ -575,8 +851,39 @@ void create_controls() {
     ui.play = add(WC_BUTTONW, L"Play Game", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 3 * 128 + 8, kButtonsTop, 120, 36), kPlay);
     ui.install = add(WC_BUTTONW, L"Install", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 2 * 128 + 8, kButtonsTop, 120, 36), IDOK);
     ui.exit = add(WC_BUTTONW, L"Exit", WS_TABSTOP | BS_OWNERDRAW, rect(kWidth - 28 - 128 + 8, kButtonsTop, 120, 36), IDCANCEL);
+    ui.page_button = add(WC_BUTTONW, L"Game settings", WS_TABSTOP | BS_OWNERDRAW, rect(28, kButtonsTop, 150, 36), kPage);
     ui.inputs = {ui.game.edit, ui.game.browse, ui.dlc.edit, ui.dlc.browse, ui.save.edit, ui.save.browse,
-                 ui.stereo[0], ui.stereo[1], ui.stereo[2], ui.skip_intro, ui.exit};
+                 ui.stereo[0], ui.stereo[1], ui.stereo[2], ui.skip_intro, ui.exit, ui.page_button};
+    // The Game settings page (hidden until its button): the choices, the size field, - and +.
+    for (int i = 0; i < kSettingRows; ++i) {
+        SettingRow& row = settings[i];
+        const int y = kSetTop + i * kSetPitch + 3, h = kSetHeight - 6;
+        if (!row.options.empty()) {
+            const int n = static_cast<int>(row.options.size()), gap = 6;
+            const int w = (kChoicesRight - kChoicesLeft - (n - 1) * gap) / n;
+            for (int o = 0; o < n; ++o)
+                row.buttons.push_back(add(WC_BUTTONW, row.options[o].label, WS_TABSTOP | BS_OWNERDRAW,
+                                          rect(kChoicesLeft + o * (w + gap), y, w, h), setting_id(i, o)));
+        } else if (i == kRowDepth || i == kRowConvergence) {
+            row.buttons.push_back(add(WC_BUTTONW, L"\u2212", WS_TABSTOP | BS_OWNERDRAW, rect(kChoicesLeft, y, 34, h), setting_id(i, 0)));
+            row.buttons.push_back(add(WC_BUTTONW, L"+", WS_TABSTOP | BS_OWNERDRAW, rect(kChoicesLeft + 110, y, 34, h), setting_id(i, 1)));
+            row.buttons.push_back(add(WC_BUTTONW, i == kRowDepth ? L"Swap eyes" : L"Defaults", WS_TABSTOP | BS_OWNERDRAW,
+                                      rect(kChoicesRight - 130, y, 130, h), setting_id(i, 2)));
+        }
+        for (HWND b : row.buttons) {
+            ShowWindow(b, SW_HIDE);
+            ui.inputs.push_back(b);
+        }
+    }
+    {
+        RECT box = rect(kChoicesLeft, kSetTop + kRowSize * kSetPitch + 3, 130, kSetHeight - 6);
+        const int h = px(19);
+        RECT r = {box.left + px(6), box.top + (box.bottom - box.top - h) / 2, box.right - px(6), 0};
+        r.bottom = r.top + h;
+        size_edit = add(WC_EDITW, L"", WS_TABSTOP | ES_AUTOHSCROLL, r, kSizeEdit);
+        ShowWindow(size_edit, SW_HIDE);
+        ui.inputs.push_back(size_edit);
+    }
 
     // Start from what the last install chose (paths.ini here, else the per-user copy), else an empty
     // game and DLC folder and save\ here.
@@ -604,7 +911,14 @@ LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_COMMAND:
         if (HIWORD(wp) == EN_CHANGE) {
-            validate();
+            if (LOWORD(wp) == kSizeEdit)
+                size_changed();
+            else
+                validate();
+            return 0;
+        }
+        if (int row = 0, index = 0; setting_control(LOWORD(wp), row, index)) {
+            choose_setting(row, index);
             return 0;
         }
         switch (LOWORD(wp)) {
@@ -613,6 +927,9 @@ LRESULT CALLBACK wnd_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case kPlay:
             play();
+            return 0;
+        case kPage:
+            show_page(1 - ui.page);
             return 0;
         case IDCANCEL:
             if (!ui.busy)
