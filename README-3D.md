@@ -22,6 +22,7 @@
 |---|---|
 | Play | `resogun.exe` or the desktop shortcut — it starts in the 3D mode chosen in the setup |
 | Change the mode, or back to 2D | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side → **Install** |
+| Game settings (window, FPS, VSync, resolution, HDR, speakers, 3D depth) | `resogun-setup.exe` → **Game settings** — each choice is saved at once; **Back** returns |
 | 3D on/off while playing | **Ctrl+F3** (between the setup's mode and off) |
 | Less / more depth | **Ctrl+F5 / Ctrl+F6** (0.1 per press) |
 | Scene forward / back | **Ctrl+F7 / Ctrl+F8** (convergence ÷1.1 / ×1.1) |
@@ -33,7 +34,7 @@ Each key shows the new values at the top of the picture and saves them at once.
 
 ### Settings (settings.ini)
 
-The game reads `settings.ini` in the save folder (else the one next to `resogun.exe`). The setup and the keys write these lines:
+The game reads `settings.ini` in the save folder (else the one next to `resogun.exe`). The setup (its 3D row and its **Game settings** page) and the keys write these lines:
 
 | Key | Values | Default |
 |---|---|---|
@@ -83,6 +84,7 @@ Source: this branch (`stereo-3d`), GPL-2.0-or-later like the original.
 |---|---|
 | 게임 시작 | `resogun.exe` 또는 바탕화면 바로가기 — 셋업에서 고른 3D 방식으로 시작 |
 | 방식 바꾸기, 2D로 돌아가기 | `resogun-setup.exe` → *3D (stereo)*: Off / SR panel / Side by side → **Install** |
+| 게임 설정 (창 모드, FPS, VSync, 해상도, HDR, 스피커, 3D 깊이) | `resogun-setup.exe` → **Game settings** — 고르면 바로 저장, **Back** 으로 돌아감 |
 | 게임 중 3D 켜기/끄기 | **Ctrl+F3** (셋업에서 고른 방식 ↔ 끔) |
 | 깊이 줄이기 / 늘리기 | **Ctrl+F5 / Ctrl+F6** (한 번에 0.1) |
 | 장면을 앞으로 / 뒤로 | **Ctrl+F7 / Ctrl+F8** (수렴 ÷1.1 / ×1.1) |
@@ -94,7 +96,7 @@ Source: this branch (`stereo-3d`), GPL-2.0-or-later like the original.
 
 ### 설정 (settings.ini)
 
-게임은 save 폴더의 `settings.ini` 를 읽습니다(없으면 `resogun.exe` 옆의 것). 셋업과 단축키가 아래 줄을 씁니다.
+게임은 save 폴더의 `settings.ini` 를 읽습니다(없으면 `resogun.exe` 옆의 것). 셋업(3D 줄과 **Game settings** 페이지)과 단축키가 아래 줄을 씁니다.
 
 | 키 | 값 | 기본값 |
 |---|---|---|
