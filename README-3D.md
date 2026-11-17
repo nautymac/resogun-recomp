@@ -12,9 +12,11 @@
 
 ### Install — 3 steps
 
-1. **Download two zips:** the original Resogun PC release the 3D zip is made for (v0.10: [resogun-pc-v0.10-2026-11-11.zip](https://github.com/rcostanza/resogun-recomp/releases/download/v0.10/resogun-pc-v0.10-2026-11-11.zip)) and the 3D zip.
+1. **Download two zips:** the original Resogun PC release the 3D zip is made for (v0.14: [resogun-pc-v0.14-2026-11-17.zip](https://github.com/rcostanza/resogun-recomp/releases/download/v0.14/resogun-pc-v0.14-2026-11-17.zip)) and the 3D zip.
 2. **Unpack both to the same place** — the original first, then the 3D zip (replace files). Both have the same folder inside, so they end up in one folder. For a folder you already use, copy the files *inside* the 3D zip's folder into it.
 3. **Run `resogun-setup.exe`** → *Game folder*: your PS4 dump (CUSA00038, v1.10) → *3D (stereo)*: **SR panel** or **Side by side** → **Install** → **Play Game**.
+
+**Updating** to a newer original release and its 3D zip: unpack both over the folder the same way (the original first). The first start prepares the game again by itself; saves and settings are kept.
 
 ### Use
 
@@ -27,7 +29,7 @@
 | Less / more depth | **Ctrl+F5 / Ctrl+F6** (0.1 per press) |
 | Scene forward / back | **Ctrl+F7 / Ctrl+F8** (convergence ÷1.1 / ×1.1) |
 | Swap the eyes | **Ctrl+F9** |
-| Depth and convergence on the gamepad | Hold **L1 + R1** and press the D-pad: **← / →** less / more depth, **↑ / ↓** scene back / forward. Held, it repeats |
+| Depth and convergence on the gamepad | Hold **L1 + R1** and press the D-pad: **← / →** less / more depth, **↑ / ↓** scene back / forward. Held, it repeats. Player 1's gamepad |
 
 Each key shows the new values at the top of the picture and saves them at once (L1 + R1: when you let go of them). While L1 + R1 are held the game gets neither of them nor the D-pad; a single L1 or R1 reaches the game 0.06 s late, the time to press the other one.
 
@@ -75,9 +77,11 @@ Source: this branch (`stereo-3d`), GPL-2.0-or-later like the original.
 
 ### 설치 — 3단계
 
-1. **zip 두 개 받기:** 3D zip 이 기준으로 삼는 원작 Resogun PC 릴리스(v0.10: [resogun-pc-v0.10-2026-11-11.zip](https://github.com/rcostanza/resogun-recomp/releases/download/v0.10/resogun-pc-v0.10-2026-11-11.zip))와 3D zip.
+1. **zip 두 개 받기:** 3D zip 이 기준으로 삼는 원작 Resogun PC 릴리스(v0.14: [resogun-pc-v0.14-2026-11-17.zip](https://github.com/rcostanza/resogun-recomp/releases/download/v0.14/resogun-pc-v0.14-2026-11-17.zip))와 3D zip.
 2. **같은 곳에 둘 다 풀기** — 원작 먼저, 3D zip 나중에(덮어쓰기). 두 zip 안 폴더 이름이 같아서 한 폴더로 합쳐집니다. 이미 쓰고 있는 폴더라면 3D zip 안 폴더의 *내용*을 그 폴더에 덮어 복사합니다.
 3. **`resogun-setup.exe` 실행** → *Game folder*: PS4 덤프 (CUSA00038, 버전 1.10) → *3D (stereo)*: **SR panel** 또는 **Side by side** → **Install** → **Play Game**.
+
+**업데이트:** 더 새로운 원작 릴리스와 그에 맞는 3D zip 을 같은 방법으로(원작 먼저) 폴더에 덮어 풉니다. 처음 실행할 때 게임을 알아서 다시 준비하고, 세이브와 설정은 그대로입니다.
 
 ### 사용법
 
@@ -90,7 +94,7 @@ Source: this branch (`stereo-3d`), GPL-2.0-or-later like the original.
 | 깊이 줄이기 / 늘리기 | **Ctrl+F5 / Ctrl+F6** (한 번에 0.1) |
 | 장면을 앞으로 / 뒤로 | **Ctrl+F7 / Ctrl+F8** (수렴 ÷1.1 / ×1.1) |
 | 왼쪽·오른쪽 눈 바꾸기 | **Ctrl+F9** |
-| 게임패드로 깊이·수렴 조절 | **L1 + R1** 을 누른 채 십자키: **← / →** 깊이 줄이기 / 늘리기, **↑ / ↓** 장면을 뒤로 / 앞으로. 누르고 있으면 반복 |
+| 게임패드로 깊이·수렴 조절 | **L1 + R1** 을 누른 채 십자키: **← / →** 깊이 줄이기 / 늘리기, **↑ / ↓** 장면을 뒤로 / 앞으로. 누르고 있으면 반복. 1P 게임패드 |
 
 키를 누르면 바뀐 값이 화면 위에 잠깐 뜨고 바로 저장됩니다(L1 + R1 은 손을 뗄 때 저장). L1 + R1 을 누르고 있는 동안 게임에는 두 버튼과 십자키가 가지 않습니다. L1 이나 R1 하나만 누르면 다른 쪽을 누를 시간(0.06초)만큼 늦게 게임에 갑니다.
 
