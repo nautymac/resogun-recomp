@@ -154,104 +154,8 @@ static bool PerfDiag();
 // hit a byte the GPU wrote (the rest only share its 4 KiB page).
 static std::atomic<u64> write_downloads{0}, write_downloads_inside{0};
 
-// resogun: Resogun's CPU fills records into pages it shares with small GPU-written buffers
-// (a compute copy's 5 KiB destination; RESOGUN_PERF_DIAG readback report). Page tracking made
-// each such write fault download the GPU's bytes first, waiting for the whole GPU queue: ~160
-// a second, 4 ms of GPU idle a frame on a Radeon 890M. The CPU writes other bytes of the page,
-// so they are merged instead: the page's next upload leaves out the GPU-written bytes the guest
-// has not changed since the fault. Only in Relaxed readback mode: pages there are never
-// read-protected, so the fault can read them, and guest reads of GPU-written bytes see the
-// guest's copy either way.
-bool BufferCache::TryMergeWrite(VAddr device_addr, u64 size) {
-    if (ResogunToggle::Disabled(ResogunToggle::WriteMerge) ||
-        EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Relaxed) {
-        return false;
-    }
-    const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
-    if (device_addr + size > page + TRACKER_BYTES_PER_PAGE ||
-        gpu_modified_ranges.Intersects(device_addr, size)) {
-        return false;
-    }
-    std::vector<MergedRange> ranges;
-    gpu_modified_ranges.ForEachInRange(page, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
-        const auto* bytes = std::bit_cast<const u8*>(start);
-        ranges.push_back({start, std::vector<u8>(bytes, bytes + (end - start))});
-    });
-    if (ranges.empty()) {
-        return false;
-    }
-    {
-        std::scoped_lock lock{merged_mutex};
-        // An entry still here was saved before any guest write to the page since; keep it.
-        if (merged_pages.try_emplace(page, std::move(ranges)).second) {
-            merged_count.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    ResogunStats::merged_writes.fetch_add(1, std::memory_order_relaxed);
-    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-    return true;
-}
-
-void BufferCache::ForgetMergedWrites(VAddr device_addr, u64 size) {
-    if (merged_count.load(std::memory_order_relaxed) == 0) {
-        return;
-    }
-    std::scoped_lock lock{merged_mutex};
-    auto it = merged_pages.lower_bound(Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE));
-    while (it != merged_pages.end() && it->first < device_addr + size) {
-        it = merged_pages.erase(it);
-        merged_count.fetch_sub(1, std::memory_order_relaxed);
-    }
-}
-
-template <typename Emit>
-void BufferCache::EmitUploadRange(VAddr addr, u64 size, Emit&& emit) {
-    if (merged_count.load(std::memory_order_relaxed) == 0) {
-        emit(addr, size);
-        return;
-    }
-    std::scoped_lock lock{merged_mutex};
-    // Runs of bytes the guest still holds as saved are the GPU's: skipped.
-    MergedRangeSplitter splitter{addr, size, MergedRangeSplitter::Skip::Unchanged};
-    auto it = merged_pages.lower_bound(Common::AlignDown(addr, TRACKER_BYTES_PER_PAGE));
-    while (it != merged_pages.end() && it->first < addr + size) {
-        for (const MergedRange& range : it->second) {
-            splitter.Add(range, emit);
-        }
-        it = merged_pages.erase(it);
-        merged_count.fetch_sub(1, std::memory_order_relaxed);
-    }
-    splitter.Finish(emit);
-}
-
-// resogun: after TryMergeWrite the page is writable and the guest can write over the GPU-written
-// bytes without a fault. A later download of the page (a write fault elsewhere in its 512 KiB
-// window) must not put the GPU's older copy back over those writes: it did, over a shader
-// header the game had just written (crash at eboot 0x69d459 loading a level's shaders).
-void BufferCache::WriteDownload(VAddr device_addr, const u8* data, u64 size) {
-    const auto write = [&](VAddr start, u64 bytes) {
-        memory->TryWriteBacking(std::bit_cast<u8*>(start), data + (start - device_addr), bytes);
-    };
-    if (merged_count.load(std::memory_order_relaxed) == 0) {
-        write(device_addr, size);
-        return;
-    }
-    std::scoped_lock lock{merged_mutex};
-    MergedRangeSplitter splitter{device_addr, size, MergedRangeSplitter::Skip::Changed};
-    auto it = merged_pages.lower_bound(Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE));
-    for (; it != merged_pages.end() && it->first < device_addr + size; ++it) {
-        for (const MergedRange& range : it->second) {
-            splitter.Add(range, write);
-        }
-    }
-    splitter.Finish(write);
-}
-
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
-        if (is_write && TryMergeWrite(device_addr, size)) {
-            return;
-        }
         if (is_write && PerfDiag()) {
             ++write_downloads;
             write_downloads_inside += gpu_modified_ranges.Intersects(device_addr, size) ? 1 : 0;
@@ -405,13 +309,10 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
-        WriteDownload(arena_base + copy.srcOffset,
-                      download.mapped + (copy.dstOffset - download.offset), copy.size);
+        memory->TryWriteBacking(std::bit_cast<u8*>(arena_base + copy.srcOffset),
+                                download.mapped + (copy.dstOffset - download.offset), copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
-    // resogun: the guest now holds the GPU's bytes and its own newer writes; the pages are still
-    // CPU modified, so their next upload sends them whole.
-    ForgetMergedWrites(device_addr, size);
 }
 
 namespace {
@@ -729,10 +630,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 addr, u64 size) {
-            EmitUploadRange(addr, size, [&](u64 start, u64 bytes) {
-                copies.emplace_back(total_size_bytes, start, bytes);
-                total_size_bytes += bytes;
-            });
+            copies.emplace_back(total_size_bytes, addr, size);
+            total_size_bytes += size;
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
 

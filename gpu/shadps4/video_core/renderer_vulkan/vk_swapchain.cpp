@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+// resogun: VK_EXT_full_screen_exclusive's structures are in the Win32 platform header.
+#if defined(_WIN64)
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <limits>
@@ -59,7 +64,26 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    // resogun: a window covering the screen is taken to exclusive fullscreen by the Windows driver
+    // (NVIDIA's for Vulkan), so borderless would flicker and switch modes on Alt+Tab like
+    // fullscreen. Borderless disallows it; fullscreen allows it; a window keeps the default.
+    display_mode = ResogunSettings::Get().display_mode;
+    const vk::SurfaceFullScreenExclusiveInfoEXT full_screen_info = {
+        .fullScreenExclusive = display_mode == ResogunGraphics::Borderless ? vk::FullScreenExclusiveEXT::eDisallowed
+                               : display_mode == ResogunGraphics::Fullscreen ? vk::FullScreenExclusiveEXT::eAllowed
+                                                                              : vk::FullScreenExclusiveEXT::eDefault,
+    };
+    const void* swapchain_next = instance.IsFullScreenExclusiveSupported() ? &full_screen_info : nullptr;
+    if (static int shown = -1; swapchain_next && shown != display_mode) {
+        shown = display_mode;
+        std::printf("Swapchain: exclusive fullscreen %s\n", vk::to_string(full_screen_info.fullScreenExclusive).c_str());
+    }
+#else
+    const void* swapchain_next = nullptr;
+#endif
     const vk::SwapchainCreateInfoKHR swapchain_info = {
+        .pNext = swapchain_next,
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -267,7 +291,9 @@ void Swapchain::FindPresentMode() {
 
 void Swapchain::UpdateVsync() {
     const auto& settings = ResogunSettings::Get();
-    if (settings.vsync == vsync && settings.tearing == tearing) {
+    // resogun: a display mode change remakes the swapchain too (its full_screen_info, Create).
+    const bool mode_changed = instance.IsFullScreenExclusiveSupported() && settings.display_mode != display_mode;
+    if (settings.vsync == vsync && settings.tearing == tearing && !mode_changed) {
         return;
     }
     if (const auto result = instance.GetDevice().waitIdle(); result != vk::Result::eSuccess) {

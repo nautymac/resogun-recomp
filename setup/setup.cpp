@@ -13,6 +13,8 @@
 #include <cstdlib>
 #endif
 
+#include <sys/stat.h>
+
 #include <cwctype>
 #include <fstream>
 #include <iterator>
@@ -24,12 +26,11 @@ namespace fs = std::filesystem;
 namespace setup {
 
 namespace {
-// For an eboot.bin that is not a verified build (scripts/prepare.py VERIFIED_BUILDS).
-constexpr wchar_t kUnverifiedWarning[] =
-    L"This dump's eboot.bin is not the version this release was tested with (the unmodified eboot.bin "
-    L"of Resogun CUSA00038, update 1.10). Patched files, such as DLC unlockers, and other versions are "
-    L"untested: the game may be unstable or crash.\n\nAll add-ons already show as owned without an "
-    L"unlocker.";
+// For a dump that is not the verified build (scripts/prepare.py VERIFIED_BUILDS and VERIFIED_TITLE).
+constexpr wchar_t kUntested[] =
+    L"These game files are untested: this release was tested with the unmodified Resogun CUSA00038 with "
+    L"update 1.10 (eboot.bin and sce_sys/param.sfo). Other versions and patched files, such as DLC "
+    L"unlockers, might cause bugs or crashes.\n\nAll add-ons already show as owned without an unlocker.";
 
 // What run.py reads from the dump to prepare the image (IMAGE_INPUTS), and the title's param.sfo.
 constexpr const wchar_t* kGameFiles[] = {
@@ -287,9 +288,9 @@ std::wstring strip(const std::wstring& s) {
 
 void write_paths(const fs::path& ini, const fs::path& game, const fs::path& save, const fs::path& dlc) {
 #ifdef _WIN32
-    const std::string setup = "resogun-setup.exe", cache = "%LOCALAPPDATA%\\Resogun";
+    const std::string setup = "resogun-setup.exe";
 #else
-    const std::string setup = "resogun-setup", cache = "~/.cache/resogun";
+    const std::string setup = "resogun-setup";
 #endif
     const std::string nl = kNewline;
     write_text(ini, "; Written by " + setup + ". Run it again to change these folders." + nl +
@@ -297,7 +298,7 @@ void write_paths(const fs::path& ini, const fs::path& game, const fs::path& save
                     "; save: your saves, and resogun.log in its log folder." + nl +
                     "; dlc: optional, one more folder of DLC (e.g. shadPS4's addcont), next to save's addcont." + nl +
                     "; Shader caches are in the shaders folder next to " + setup + "." + nl +
-                    "; The GPU logs and screenshots are shared by every copy of the game: " + cache + nl +
+                    "; The GPU logs and screenshots are in the gpu folder next to " + setup + nl +
                     "; (cache=<folder> moves them)." + nl +
                     "[paths]" + nl +
                     "game=" + narrow(text(game)) + nl +
@@ -547,14 +548,22 @@ std::optional<Paths> read_paths(const fs::path& root) {
     return read_paths_file(root / L"paths.ini", root);
 }
 
+void adopt_user_paths(const fs::path& root) {
+    std::error_code ec;
+    fs::path user = user_paths_ini(), local = root / L"paths.ini";
+    if (user.empty() || !fs::is_regular_file(user, ec))
+        return;
+    if (!fs::exists(local, ec))
+        fs::copy_file(user, local, ec);
+    if (!fs::is_regular_file(local, ec))
+        return; // the release folder cannot be written: leave the old copy where it is
+    fs::remove(user, ec);
+    fs::remove(user.parent_path(), ec); // only when nothing else is in it
+}
+
 std::optional<Paths> remembered_paths(const fs::path& root) {
-    if (auto paths = read_paths(root))
-        return paths;
-    try {
-        return read_paths_file(user_paths_ini(), root);
-    } catch (const Error&) {
-        return std::nullopt;
-    }
+    adopt_user_paths(root);
+    return read_paths(root);
 }
 
 fs::path default_save() {
@@ -564,9 +573,12 @@ fs::path default_save() {
 bool ready(const fs::path& root) {
     std::error_code ec;
     fs::path stamp = root / L"game" / L"release.txt", release = root / L"release.txt";
+    fs::path source = root / L"game" / L"source.txt";
     try {
-        return read_paths(root) && fs::is_regular_file(root / kGameExe, ec) && fs::is_regular_file(stamp, ec) &&
-               fs::is_regular_file(release, ec) && read_text(stamp) == read_text(release);
+        auto paths = read_paths(root);
+        return paths && fs::is_regular_file(root / kGameExe, ec) && fs::is_regular_file(stamp, ec) &&
+               fs::is_regular_file(release, ec) && read_text(stamp) == read_text(release) &&
+               fs::is_regular_file(source, ec) && read_text(source) == source_stamp(paths->game) + "\n";
     } catch (const Error&) {
         return false;
     }
@@ -642,6 +654,19 @@ bool has_saves(const fs::path& save) {
     return fs::is_directory(data, ec) && !fs::is_empty(data, ec);
 }
 
+std::string source_stamp(const fs::path& game) {
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_wstat64((game / L"eboot.bin").c_str(), &st))
+        return {};
+#else
+    struct stat st;
+    if (stat((game / "eboot.bin").c_str(), &st))
+        return {};
+#endif
+    return std::to_string(static_cast<long long>(st.st_size)) + " " + std::to_string(static_cast<long long>(st.st_mtime));
+}
+
 fs::path install(const Options& opt, const Log& log) {
     fs::path root = clean(opt.root), game = game_folder(opt.game), save = clean(opt.save);
     fs::path dlc = opt.dlc.empty() ? fs::path() : clean(opt.dlc);
@@ -674,6 +699,7 @@ fs::path install(const Options& opt, const Log& log) {
     step(0.05, L"Preparing the game from your dump");
     log(L"Preparing the game from " + text(game));
     fs::remove(image / L"release.txt", ec); // the image is this release's only once it is complete
+    fs::remove(image / L"source.txt", ec);
     std::vector<std::wstring> command = python;
     command.insert(command.end(), {text(prepare / L"run.py"), L"prepare", L"--game", text(game),
                                    L"--out", text(image)});
@@ -682,15 +708,27 @@ fs::path install(const Options& opt, const Log& log) {
 #else
     setenv("PYTHONIOENCODING", "utf-8", 1);
 #endif
-    // Exit code 3: eboot.bin is not one of the builds scripts/prepare.py lists as verified, and nothing
-    // was prepared. The player is warned, and on going on it is prepared anyway (--any-build).
+    // Exit code 3: eboot.bin or param.sfo is not the build scripts/prepare.py lists as verified, and
+    // nothing was prepared. The player is asked once per dump (game/untested.txt keeps the stamp of the
+    // eboot.bin they went on with), then it is prepared anyway (--any-build).
+    fs::path untested = image / L"untested.txt";
     unsigned long code = run(command, prepare, log);
     if (code == 3) {
-        log(L"warning: " + std::wstring(kUnverifiedWarning));
-        if (opt.confirm && !opt.confirm(std::wstring(kUnverifiedWarning) + L"\n\nContinue anyway?"))
+        std::string stamp = source_stamp(game) + "\n";
+        bool accepted = false;
+        try {
+            accepted = fs::is_regular_file(untested, ec) && read_text(untested) == stamp;
+        } catch (const Error&) {
+        }
+        log(L"warning: " + std::wstring(kUntested));
+        if (!accepted && opt.confirm && !opt.confirm(std::wstring(kUntested) + L"\n\nContinue anyway?"))
             fail(L"Setup stopped: the game was not prepared.");
+        fs::create_directories(image, ec);
+        write_text(untested, stamp);
         command.push_back(L"--any-build");
         code = run(command, prepare, log);
+    } else {
+        fs::remove(untested, ec);
     }
     if (code)
         fail(L"Preparing the game failed (exit code " + std::to_wstring(code) + L"). The log says why.");
@@ -715,6 +753,7 @@ fs::path install(const Options& opt, const Log& log) {
     } else {
         fs::remove(image / L"isa-rewrite.bin", ec);
     }
+    write_text(image / L"source.txt", source_stamp(game) + "\n");
     write_text(image / L"release.txt", read_text(root / L"release.txt"));
     log(L"prepared " + text(image));
     step(0.9, L"Writing settings and folders");
@@ -766,16 +805,8 @@ fs::path install(const Options& opt, const Log& log) {
     write_paths(root / L"paths.ini", game, save, dlc);
     log(L"wrote    paths.ini (game " + text(game) + L", save " + text(save) +
         (dlc.empty() ? L"" : L", dlc " + text(dlc)) + L")");
-    // The per-user copy, for the next release unpacked elsewhere; the game runs without it.
-    if (fs::path user = user_paths_ini(); !user.empty()) {
-        try {
-            fs::create_directories(user.parent_path(), ec);
-            write_paths(user, clean(game), clean(save), dlc);
-            log(L"wrote    " + text(user));
-        } catch (const Error& e) {
-            log(L"skipped  " + text(user) + L" (" + e.message + L")");
-        }
-    }
+    // Nothing is kept outside this folder: an older setup's per-user copy goes.
+    adopt_user_paths(root);
     step(1.0, L"Ready");
     return exe;
 }

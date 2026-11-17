@@ -205,9 +205,10 @@ else()
     set_target_properties(resogun PROPERTIES POSITION_INDEPENDENT_CODE OFF)
     target_link_options(resogun PRIVATE -no-pie)
     target_link_libraries(resogun PRIVATE ${CMAKE_DL_LIBS} m)
-    # resogun-setup (setup/): the same install, asking in a terminal or with the desktop's dialogs (SDL).
+    # resogun-setup (setup/): the same install, asking in a terminal or with the desktop's dialogs (SDL);
+    # --update draws its progress in an SDL window from the install thread's state.
     add_executable(resogun-setup ../setup/main_linux.cpp ../setup/setup.cpp)
-    target_link_libraries(resogun-setup PRIVATE PkgConfig::SDL3)
+    target_link_libraries(resogun-setup PRIVATE PkgConfig::SDL3 -pthread)
 endif()
 # resogun: runtime and renderer unit tests (bash build.sh --test builds and runs every *-test).
 add_executable(audio-test EXCLUDE_FROM_ALL ../tests/test_audio.c ${RESOGUN_COMPAT})
@@ -354,9 +355,6 @@ target_compile_options(wait-diagnostics-test PRIVATE -UNDEBUG)
 add_executable(readback-sources-test EXCLUDE_FROM_ALL ../tests/test_readback_sources.cpp)
 target_include_directories(readback-sources-test PRIVATE shadps4)
 target_compile_options(readback-sources-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-add_executable(merged-writes-test EXCLUDE_FROM_ALL ../tests/test_merged_writes.cpp)
-target_include_directories(merged-writes-test PRIVATE shadps4)
-target_compile_options(merged-writes-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_executable(page-state-test EXCLUDE_FROM_ALL ../tests/test_page_state.cpp)
 target_include_directories(page-state-test PRIVATE ../tests/stubs shim shadps4)
 target_link_libraries(page-state-test PRIVATE Boost::headers)

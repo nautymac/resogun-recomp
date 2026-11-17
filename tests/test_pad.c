@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../src/runtime_pad.c"
 
@@ -14,6 +15,12 @@ int resogun_display_settings_is_open(void) { return 0; }
 void resogun_display_settings_open(void) {}
 int resogun_title_back_exits(void) { return 1; }
 void resogun_exit_prompt_open(void) {}
+static int stereo_on=1, stereo_depth_steps, stereo_conv_steps, stereo_saves;
+int resogun_gpu_stereo_available(void) { return stereo_on; }
+void resogun_gpu_stereo_adjust(int depth_steps, int convergence_steps) {
+    stereo_depth_steps+=depth_steps; stereo_conv_steps+=convergence_steps;
+}
+void resogun_gpu_stereo_save(void) { ++stereo_saves; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -67,9 +74,74 @@ static void test_pad_buttons(void) {
     assert(sources_of(&pad_map,BTN_CROSS)==1 && sources_of(&key_map,BTN_CROSS)==3);
 }
 
+/* Users 1 and 2 each open one pad, whose handle is the user id; user 2's reads disconnected
+ * until a second gamepad connects, and the keyboard stays with user 1. */
+static void test_two_users(void) {
+    assert(pad_open(1,0,0,NULL)==ERR_NOT_INITIALIZED);
+    assert(pad_init()==0);
+    assert(pad_open(3,0,0,NULL)==ERR_INVALID_ARG);
+    opened[0]=opened[1]=1; /* as pad_open does, without its host thread */
+    assert(slot_of(1)==0 && slot_of(2)==1 && slot_of(3)==-1 && slot_of(0)==-1);
+    PadData d;
+    assert(pad_read_state(2,&d)==0 && !d.connected);
+    assert(pad_read_state(1,&d)==0 && d.connected);
+    ControllerInfo info;
+    assert(pad_info(2,&info)==0 && !info.connected && pad_info(1,&info)==0 && info.connected);
+    host_read(&d,1,NULL,1);
+    assert(!d.connected);
+    const uint8_t rumble2[2]={200,10};
+    assert(pad_vibration(2,rumble2)==0 && rumble[1].large==200 && rumble[0].large==0);
+    const uint8_t red[3]={255,0,0};
+    assert(pad_light_bar(2,red)==0 && light[1].r==255 && light[0].r==0);
+    assert(pad_close(2)==0 && pad_read_state(2,&d)==ERR_INVALID_HANDLE && pad_close(2)==ERR_INVALID_HANDLE);
+}
+
+/* L1+R1 with the D-pad steps the 3D values instead of reaching the game; letting go saves them,
+ * a direction still held stays hidden, and a lone shoulder is held back only at first. */
+static void test_stereo_combo(void) {
+    PadData d;
+    memset(&d,0,sizeof d);
+    d.buttons=BTN_L1|BTN_R1|BTN_RIGHT|BTN_CROSS;
+    stereo_combo(&d);
+    assert(d.buttons==BTN_CROSS && stereo_depth_steps==1 && stereo_conv_steps==0 && !stereo_saves);
+    d.buttons=BTN_L1|BTN_R1|BTN_RIGHT; /* held: no repeat before the first delay */
+    stereo_combo(&d);
+    assert(!d.buttons && stereo_depth_steps==1);
+    d.buttons=BTN_L1|BTN_R1|BTN_UP;
+    stereo_combo(&d);
+    assert(!d.buttons && stereo_conv_steps==1);
+    d.buttons=BTN_L1; /* one let go: the other stays hidden */
+    stereo_combo(&d);
+    assert(!d.buttons && !stereo_saves);
+    d.buttons=BTN_UP; /* both let go: saved, the held direction hidden until released */
+    stereo_combo(&d);
+    assert(!d.buttons && stereo_saves==1);
+    d.buttons=0;
+    stereo_combo(&d);
+    d.buttons=BTN_UP;
+    stereo_combo(&d);
+    assert(d.buttons==BTN_UP);
+    d.buttons=BTN_R1; /* a new lone shoulder waits for the other one */
+    stereo_combo(&d);
+    assert(!d.buttons);
+    d.buttons=0; /* a tap shorter than the wait still arrives */
+    stereo_combo(&d);
+    assert(d.buttons==BTN_R1);
+    stereo_on=0; /* 3D off: everything reaches the game */
+    for (int i=0;i<3;++i) { d.buttons=0; stereo_combo(&d); } /* the tap ends */
+    usleep(STEREO_TAP_US+10000);
+    d.buttons=0;
+    stereo_combo(&d);
+    d.buttons=BTN_L1|BTN_R1|BTN_LEFT;
+    stereo_combo(&d);
+    assert(d.buttons==(BTN_L1|BTN_R1|BTN_LEFT) && stereo_depth_steps==1);
+}
+
 int main(void) {
     test_default_keyboard();
     test_pad_buttons();
+    test_two_users();
+    test_stereo_combo();
     puts("pad tests passed");
     return 0;
 }

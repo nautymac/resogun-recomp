@@ -29,8 +29,9 @@
 #define ERR_ALREADY_INIT ((int32_t)0x8026000E)
 #define ERR_NOT_INIT ((int32_t)0x8026000F)
 #define VOLUME_0DB 32768
-/* Pad speaker ports (type 4) play on the main output. Games master them for the DualShock 4's
-   small speaker, up to ~14 dB over the main mix; -15 dB puts them at its level; tune by ear. */
+/* Pad speaker ports (type 4) play on the controller's speaker when a DualShock 4 or DualSense is on
+   USB (pad_target), else on the main output. Games master them for the DualShock 4's small speaker,
+   up to ~14 dB over the main mix; on the main output -15 dB puts them at its level; tune by ear. */
 #define PAD_SPEAKER_GAIN 0.17783f
 
 typedef struct {
@@ -41,6 +42,9 @@ typedef struct {
     int32_t volume[8];
     int32_t mix_level; /* pad speaker ports: sceAudioOutSetMixLevelPadSpk, VOLUME_0DB by default */
     SDL_AudioStream *stream;
+    SDL_AudioDeviceID device;       /* the stream's device: SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK or a controller's */
+    int on_pad;                     /* pad speaker port playing on the controller */
+    uint64_t next_route_ns;         /* pad speaker ports: next look for a controller (route_pad_port) */
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
     int64_t adjust_ns; int window_min, window_count; /* queue level control */
     uint64_t last_output_us;
@@ -169,8 +173,19 @@ static void shape_buffer(const Port *p, const void *data, void *out) {
     static const int remap[8]={0,1,2,3,6,7,4,5};
     float gain[8];
     /* Pad speaker ports (type 4) are mastered for the DualShock 4's speaker: PAD_SPEAKER_GAIN. */
-    const float port_gain=p->type==4 ? PAD_SPEAKER_GAIN*(float)p->mix_level/VOLUME_0DB : 1.0f;
+    const float port_gain=p->type!=4 ? 1.0f : (p->on_pad ? 1.0f : PAD_SPEAKER_GAIN)*(float)p->mix_level/VOLUME_0DB;
     for (int c=0;c<p->channels;++c) gain[c]=(float)p->volume[c]/VOLUME_0DB*port_gain;
+    if (p->on_pad) {
+        /* The controller's device: the port's mix (mono) on the first two channels, which carry
+           the speaker; a DualSense's third and fourth drive its haptics and stay silent. */
+        for (size_t f=0;f<(size_t)p->frames;++f) {
+            float v=0;
+            for (int c=0;c<p->channels;++c) v+=load_sample(data,f*(size_t)p->channels+(size_t)c,p->is_float)*gain[c];
+            v=soft_limit(v/(float)p->channels);
+            for (int c=0;c<p->out_channels;++c) store_sample(out,f*(size_t)p->out_channels+(size_t)c,c<2 ? v : 0.0f,p->is_float);
+        }
+        return;
+    }
     const int fold=p->channels==8 && p->out_channels<8;
     const int n=fold ? p->out_channels : p->channels;
     for (size_t f=0;f<(size_t)p->frames;++f) {
@@ -247,6 +262,51 @@ static void try_audio_fallback(Port *p, int id) {
 }
 #endif
 
+/* The playback device of the controller runtime_pad_speaker() reports, by the name its USB audio
+   function shows ("Speakers (DualSense Wireless Controller)" on Windows, "... DualSense Wireless
+   Controller Analog Surround 4.0" on PipeWire; a DualShock 4 is a plain "Wireless Controller"). 0: none. */
+static int pad_device_matches(const char *name, int kind) {
+    if (!name) return 0;
+    if (kind==RUNTIME_PAD_SPEAKER_DUALSENSE) return strstr(name,"DualSense")!=NULL;
+    return kind==RUNTIME_PAD_SPEAKER_DS4 && strstr(name,"Wireless Controller") && !strstr(name,"DualSense");
+}
+static SDL_AudioDeviceID pad_device(int kind) {
+    if (!kind) return 0;
+    int count=0;
+    SDL_AudioDeviceID *devices=SDL_GetAudioPlaybackDevices(&count), found=0;
+    for (int i=0;devices && i<count && !found;++i)
+        if (pad_device_matches(SDL_GetAudioDeviceName(devices[i]),kind)) found=devices[i];
+    SDL_free(devices);
+    return found;
+}
+/* Pad speaker ports (sceAudioOutOpen type 4, the PS4's SCE_AUDIO_OUT_PORT_TYPE_PADSPK): plays them
+   on the controller when it is there, as the PS4 and PS5 do, and on the main output otherwise.
+   Looked at on open and once a second (a controller plugged in or pulled out mid-game moves the
+   port); caller holds p->lock. */
+static void route_pad_port(Port *p, int id) {
+    const uint64_t now=now_ns();
+    if (p->type!=4 || !sdl_audio() || now<p->next_route_ns) return;
+    p->next_route_ns=now+1000000000u;
+    const SDL_AudioDeviceID pad=pad_device(runtime_pad_speaker());
+    const SDL_AudioDeviceID target=pad ? pad : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    if (p->stream && p->device==target) return;
+    SDL_AudioSpec device; int device_frames;
+    const int channels=pad ? (SDL_GetAudioDeviceFormat(pad,&device,&device_frames) && device.channels>=2 ? device.channels : 2) : p->channels;
+    if (channels>8) return;
+    SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, channels, 48000};
+    SDL_AudioStream *stream=OPEN_AUDIO_STREAM(target,&spec,NULL,NULL);
+    if (!stream) {
+        if (pad) fprintf(stderr,"Runtime: pad speaker port %d: controller audio failed (%s)\n",id,SDL_GetError());
+        return;
+    }
+    if (p->stream) SDL_DestroyAudioStream(p->stream);
+    p->stream=stream; p->device=target; p->out_channels=channels; p->on_pad=pad!=0;
+    p->next_deadline_ns=0; p->window_count=0; p->adjust_ns=0;
+    SDL_ResumeAudioStreamDevice(stream);
+    runtime_pad_speaker_route(p->on_pad);
+    printf("Runtime: pad speaker port %d plays on %s\n",id,pad ? SDL_GetAudioDeviceName(pad) : "the main output");
+}
+
 static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_t length, uint32_t freq, uint32_t param) {
     (void)user; (void)index;
     if (!initialized) return ERR_NOT_INIT;
@@ -270,7 +330,9 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     p->mix_level=VOLUME_0DB;
     int device_channels=sdl_audio() ? default_device_channels() : 0;
     p->out_channels=p->channels==8 ? output_channels(resogun_gpu_audio_channels(),device_channels) : p->channels;
-    if (sdl_audio()) {
+    if (sdl_audio() && type==4) route_pad_port(p,id);
+    if (sdl_audio() && !p->stream) {
+        p->device=SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK; p->on_pad=0;
         SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->out_channels, 48000};
         p->stream=OPEN_AUDIO_STREAM(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
 #ifdef _WIN32
@@ -301,9 +363,10 @@ static ABI int32_t audio_close(int32_t handle) {
     if (p) {
         pthread_mutex_lock(&p->lock);
         if (p->stream) SDL_DestroyAudioStream(p->stream);
+        if (p->on_pad) runtime_pad_speaker_route(0);
         if (p->dump) fclose(p->dump);
         p->dump=NULL;
-        p->stream=NULL; p->used=0;
+        p->stream=NULL; p->used=0; p->on_pad=0;
         pthread_mutex_unlock(&p->lock);
     }
     pthread_mutex_unlock(&table_lock);
@@ -322,6 +385,7 @@ static int32_t output_port(int32_t handle, const void *data, int pace, uint64_t 
     pthread_mutex_unlock(&table_lock);
     if (!p) return error;
     pthread_mutex_lock(&p->lock);
+    route_pad_port(p,(int)(p-ports));
     size_t samples=(size_t)p->frames*(size_t)p->channels, bytes=(size_t)p->frames*(size_t)p->out_channels*(size_t)p->sample_bytes;
     uint64_t period=(uint64_t)p->frames*1000000000u/48000u;
     if (!data) ++p->silent_calls;

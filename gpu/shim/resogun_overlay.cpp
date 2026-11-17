@@ -128,7 +128,7 @@ ImTextureData* splash_texture = nullptr;
 std::atomic<int> splash_state{SplashNone}, splash_lit_frames{0};
 std::atomic<s64> splash_since{0}, splash_fade_from{0};
 std::chrono::steady_clock::time_point last_present{};
-// The Display Settings panel (F10, or Select held for 2 s: src/runtime_pad.c). The row and
+// The Display Settings panel (F10, or Select or Start held for 2 s: src/runtime_pad.c). The row and
 // dirty flag are guarded by imgui_mutex; the values live in ResogunSettings.
 std::atomic<bool> display_open{false};
 
@@ -140,7 +140,7 @@ int pending_aspect = -1;
 std::pair<int, int> pending_resolution{0, 0};
 std::chrono::steady_clock::time_point pending_since{};
 constexpr auto kResolutionSettle = std::chrono::seconds(1);
-// The exit prompt (F4, or Back on the title screen: src/runtime_pad.c); its focus (0 No, 1 Yes) is
+// The exit prompt (F4, Select+Start, or Back on the title screen: src/runtime_pad.c); its focus (0 No, 1 Yes) is
 // guarded by imgui_mutex.
 std::atomic<bool> exit_open{false};
 int exit_focus = 0;
@@ -150,7 +150,8 @@ enum DisplayRow : int { RowAspect, RowMode, RowResolution, RowMonitor, RowVsync,
 // backdrop inside a thin cyan frame.
 namespace PageInk {
 constexpr ImU32 Rgb(int r, int g, int b, int a = 255) { return IM_COL32(r, g, b, a); }
-constexpr ImU32 Shade = Rgb(0x02, 0x08, 0x0e, 0xdc), Panel = Rgb(0x04, 0x16, 0x1e, 0xd8);
+// Shade dims the game behind Display Settings and the exit prompt, 30% see-through.
+constexpr ImU32 Shade = Rgb(0x02, 0x08, 0x0e, 0xb3), Panel = Rgb(0x04, 0x16, 0x1e, 0xd8);
 constexpr ImU32 Frame = Rgb(0x8c, 0xec, 0xf4, 0xe6), FrameDim = Rgb(0x3a, 0x9c, 0xb0, 0xa0);
 constexpr ImU32 Row = Rgb(0x0c, 0x4c, 0x5c, 0xe0), RowLow = Rgb(0x06, 0x2c, 0x38, 0xe0);
 // The overlay draws to an sRGB image: these are linear, Focus shows as #2ac0d6 to #0a6e86.

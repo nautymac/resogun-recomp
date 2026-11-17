@@ -7,6 +7,8 @@ assignees: ''
 
 ---
 
+**NOTE:** make sure you've tested using the latest available version. Previous version will not be supported.
+
 **Describe the bug**
 A description of what the bug is.
 

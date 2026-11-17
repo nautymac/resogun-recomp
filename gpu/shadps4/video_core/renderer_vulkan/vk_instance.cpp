@@ -426,6 +426,17 @@ bool Instance::CreateDevice() {
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+#ifdef _WIN32
+    // resogun: lets the borderless window refuse the exclusive fullscreen a Windows driver gives a
+    // window covering the screen (vk_swapchain.cpp); it needs the instance's surface_capabilities2.
+    if (const auto [result, instance_extensions] = vk::enumerateInstanceExtensionProperties();
+        result == vk::Result::eSuccess &&
+        std::ranges::any_of(instance_extensions, [](const vk::ExtensionProperties& e) {
+            return std::string_view{e.extensionName} == VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME;
+        })) {
+        full_screen_exclusive = add_extension("VK_EXT_full_screen_exclusive");
+    }
+#endif
     shader_clock = add_extension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
     if (shader_clock) {
         shader_clock_features = feature_chain.get<vk::PhysicalDeviceShaderClockFeaturesKHR>();

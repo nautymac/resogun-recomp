@@ -5,6 +5,29 @@ Each release's section becomes the text of its GitHub release (`tools/release_no
 without one does not publish. Keep each entry on one line: GitHub shows a line break in release
 text as a break.
 
+## v0.14
+
+- Game files other than the tested version are allowed again: setup shows a one-time warning that they are untested and might cause bugs
+- More fixes for missing effects
+
+## v0.13
+
+- Fixed missing effects, like the big flash and light beams when your ship explodes after losing a life
+
+## v0.12
+
+- No need to run the setup again after updating: the game prepares itself on its first start
+- Starting the game before it's set up (or after its folders moved) opens the setup
+- To make running the game more consistent, the tested version of the game (in README) is now required, and the setup refuses game files other than it
+- Local co-op: added support for a second connected controller
+
+## v0.11
+
+- A DualShock 4 or DualSense connected by USB now plays the game's controller sounds on its own speaker, like on a PS4 or PS5.
+  - Only tested on a Dualsense. I don't have a DS4 atm, but in theory it works the same way. If it doesn't, please let me know.
+- Select+Start on a controller now asks to close the game, like F4, and holding Start opens the display settings, like holding Select.
+- Fixed borderless fullscreen mode, no longer behaves like exclusive fullscreen.
+
 ## v0.10
 
 - Fix compiled shaders not being reused on Linux (issue #8)

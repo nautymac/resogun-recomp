@@ -195,6 +195,12 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     if (window_type != Frontend::WindowSystemType::Headless) {
         extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
     }
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    // resogun: needed by VK_EXT_full_screen_exclusive (the borderless window, vk_swapchain.cpp).
+    if (window_type == Frontend::WindowSystemType::Windows) {
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    }
+#endif
 
     if (EmulatorSettings.IsHdrAllowed()) {
         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);

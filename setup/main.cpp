@@ -7,6 +7,9 @@
 // (settings.ini skip_intro), Install and Exit; after an
 // install it offers a desktop shortcut. Run it again to change a folder, or after unpacking a newer
 // release over the folder.
+// resogun.exe opens it when the game is not set up. With --update (resogun.exe, when game/ isn't
+// prepared for this release or from the dump's eboot.bin as it is now) it prepares game/ again from
+// paths.ini's folders in a small progress window, and exits 0 when the game can start.
 // With arguments it installs from the command line:
 //
 //     resogun-setup.exe --game <dump or eboot.bin> [--save <folder>] [--copy-saves]
@@ -98,7 +101,8 @@ constexpr wchar_t kUsage[] =
     L"                side, for a 3D TV or monitor) (settings.ini stereo; default: leave it as it is)\n"
     L"  --progress    also print \"progress <0 to 1> <step>\" lines (for RecompLauncher)\n"
     L"  --shortcut    also write the game's shortcut into this folder, or onto the Desktop\n"
-    L"Sets up the folder this exe is in. With no arguments, opens the setup window.";
+    L"Sets up the folder this exe is in. With no arguments, opens the setup window; with --update alone,\n"
+    L"prepares the game again from the folders already set, in a small window (resogun.exe does this).";
 
 int run_cli(const std::vector<std::wstring>& args) {
     Console con;
@@ -749,6 +753,12 @@ void browse(HWND edit, const wchar_t* title) {
     dlg->Release();
 }
 
+// Game files that are not the verified build: a warning box over `wnd`, from the install's thread
+// (MessageBoxW runs its own message loop while the window waits). No is the default.
+bool confirm_untested(HWND wnd, const std::wstring& warning) {
+    return MessageBoxW(wnd, warning.c_str(), kTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+}
+
 void start_install() {
     if (ui.busy || !IsWindowEnabled(ui.install))
         return;
@@ -779,11 +789,7 @@ void start_install() {
         auto log = [wnd](const std::wstring& line) {
             PostMessageW(wnd, kMsgLog, 0, reinterpret_cast<LPARAM>(new std::wstring(line)));
         };
-        // An eboot.bin that is not a verified build: a warning box over the setup window, from this
-        // thread (MessageBoxW runs its own message loop while the window waits).
-        opt.confirm = [wnd](const std::wstring& warning) {
-            return MessageBoxW(wnd, warning.c_str(), kTitle, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
-        };
+        opt.confirm = [wnd](const std::wstring& warning) { return confirm_untested(wnd, warning); };
         try {
             fs::path exe = setup::install(opt, log);
             PostMessageW(wnd, kMsgDone, 1, reinterpret_cast<LPARAM>(new std::wstring(exe.wstring())));
@@ -885,7 +891,7 @@ void create_controls() {
         ui.inputs.push_back(size_edit);
     }
 
-    // Start from what the last install chose (paths.ini here, else the per-user copy), else an empty
+    // Start from what the last install chose (paths.ini here, moved from an older per-user copy), else an empty
     // game and DLC folder and save\ here.
     std::optional<setup::Paths> paths;
     try {
@@ -1072,6 +1078,159 @@ int run_window(HINSTANCE inst) {
     return 0;
 }
 
+// --- --update -----------------------------------------------------------------------------------
+// resogun.exe found game/ not prepared for this release or from the dump's eboot.bin as it is now:
+// prepare it again from paths.ini's folders, in a small window of the same look (the title, the
+// step, a cyan bar). install() checks the files first; when they aren't the unmodified CUSA00038
+// update 1.10 and the player has not gone on with this dump before, a warning asks whether to.
+
+enum : UINT {
+    kMsgProgress = WM_APP + 3, // wParam: done in thousandths; lParam: std::wstring* step
+};
+
+struct Update {
+    double done = 0;
+    std::wstring step = L"Checking your game files";
+    int result = -1; // the exit code once install() has ended
+};
+Update update;
+constexpr int kUpdateWidth = 480, kUpdateHeight = 132;
+
+void paint_update(HDC dc) {
+    RECT client;
+    GetClientRect(ui.wnd, &client);
+    fill(dc, client, color::Back);
+    RECT panel = rect(10, 10, kUpdateWidth - 20, kUpdateHeight - 20);
+    fill(dc, panel, color::Panel);
+    frame(dc, panel, color::Frame, px(2));
+    text(dc, L"UPDATING RESOGUN", rect(28, 18, kUpdateWidth - 56, 32), ui.title, color::Text,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text(dc, update.step, rect(28, 52, kUpdateWidth - 56, 22), ui.font, color::Help,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    RECT bar = rect(28, 82, kUpdateWidth - 56, 18);
+    fill(dc, bar, color::Field);
+    RECT filled = bar;
+    filled.right = bar.left + static_cast<LONG>((bar.right - bar.left) * std::clamp(update.done, 0.0, 1.0));
+    if (filled.right - filled.left > 2)
+        shape(dc, filled, 0, color::FocusTop, color::FocusBottom, color::FocusTop);
+    frame(dc, bar, color::RowEdge);
+}
+
+LRESULT CALLBACK update_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(wnd, &ps);
+        RECT client;
+        GetClientRect(wnd, &client);
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, client.right, client.bottom);
+        HGDIOBJ old = SelectObject(mem, bmp);
+        paint_update(mem);
+        BitBlt(dc, 0, 0, client.right, client.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case kMsgProgress: {
+        std::unique_ptr<std::wstring> step(reinterpret_cast<std::wstring*>(lp));
+        update.done = static_cast<double>(wp) / 1000;
+        update.step = *step;
+        InvalidateRect(wnd, nullptr, FALSE);
+        return 0;
+    }
+    case kMsgLog:
+        delete reinterpret_cast<std::wstring*>(lp);
+        return 0;
+    case kMsgDone: {
+        std::unique_ptr<std::wstring> value(reinterpret_cast<std::wstring*>(lp));
+        update.result = wp == 1 ? 0 : 1;
+        if (wp != 1)
+            MessageBoxW(wnd, value->c_str(), kTitle, MB_OK | MB_ICONERROR);
+        DestroyWindow(wnd);
+        return 0;
+    }
+    case WM_CLOSE:
+        return 0; // until install() ends: closing would leave game/ half prepared
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(wnd, msg, wp, lp);
+}
+
+int run_update(HINSTANCE inst) {
+    ui.root = setup::exe_folder();
+    std::optional<setup::Paths> paths;
+    try {
+        paths = setup::remembered_paths(ui.root);
+    } catch (const setup::Error&) {
+    }
+    if (!paths) {
+        MessageBoxW(nullptr, L"The game is not set up yet. Run resogun-setup.exe.", kTitle, MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    setup::Options opt;
+    opt.root = ui.root;
+    opt.game = paths->game;
+    opt.save = paths->save;
+    opt.dlc = paths->dlc;
+
+    ui.dpi = GetDpiForSystem();
+    NONCLIENTMETRICSW ncm = {};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, ui.dpi);
+    ui.font = make_font(ncm.lfMessageFont, 15, FW_NORMAL);
+    ui.title = make_font(ncm.lfMessageFont, 22, FW_SEMIBOLD);
+    WNDCLASSEXW wc = {sizeof(wc)};
+    wc.lpfnWndProc = update_proc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursorW(nullptr, IDC_WAIT);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.lpszClassName = L"resogun_update";
+    RegisterClassExW(&wc);
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_MINIMIZEBOX;
+    RECT r = {0, 0, px(kUpdateWidth), px(kUpdateHeight)};
+    AdjustWindowRectExForDpi(&r, style, FALSE, 0, ui.dpi);
+    RECT work = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    ui.wnd = CreateWindowExW(0, wc.lpszClassName, kTitle, style, work.left + (work.right - work.left - w) / 2,
+                             work.top + (work.bottom - work.top - h) / 2, w, h, nullptr, nullptr, inst, nullptr);
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(ui.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    COLORREF caption = color::Back;
+    DwmSetWindowAttribute(ui.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof(caption));
+    ShowWindow(ui.wnd, SW_SHOW);
+    SetForegroundWindow(ui.wnd);
+
+    std::thread([opt, wnd = ui.wnd]() mutable {
+        opt.progress = [wnd](double done, const std::wstring& step) {
+            PostMessageW(wnd, kMsgProgress, static_cast<WPARAM>(std::clamp(done, 0.0, 1.0) * 1000),
+                         reinterpret_cast<LPARAM>(new std::wstring(step)));
+        };
+        opt.confirm = [wnd](const std::wstring& warning) { return confirm_untested(wnd, warning); };
+        try {
+            fs::path exe = setup::install(opt, [](const std::wstring&) {});
+            PostMessageW(wnd, kMsgDone, 1, reinterpret_cast<LPARAM>(new std::wstring(exe.wstring())));
+        } catch (const setup::Error& e) {
+            PostMessageW(wnd, kMsgDone, 0, reinterpret_cast<LPARAM>(new std::wstring(e.message)));
+        }
+    }).detach();
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    DeleteObject(ui.font);
+    DeleteObject(ui.title);
+    return update.result < 0 ? 1 : update.result;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
@@ -1079,6 +1238,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::vector<std::wstring> args(argv + 1, argv + argc);
     LocalFree(argv);
+    if (args.size() == 1 && args[0] == L"--update")
+        return run_update(inst);
     if (!args.empty())
         return run_cli(args);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

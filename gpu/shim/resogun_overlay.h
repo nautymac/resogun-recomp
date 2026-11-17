@@ -62,7 +62,7 @@ bool CapturesInput();
 void OpenDisplaySettings();
 bool DisplaySettingsOpen();
 
-/// Any thread: asks "Exit Resogun?" with No focused (also F4; Back on the title screen); Yes
+/// Any thread: asks "Exit Resogun?" with No focused (also F4 and Select+Start; Back on the title screen); Yes
 /// pushes SDL_EVENT_QUIT (as closing the window). It takes the input while open.
 void OpenExitPrompt();
 

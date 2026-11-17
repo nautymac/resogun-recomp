@@ -21,6 +21,8 @@
 
 #define USER_ID 1
 #define USER_NAME "Player"
+#define USER_ID_2 2
+#define USER_NAME_2 "Player 2"
 #define ORBIS_OK 0
 #define USER_INVALID_ARGUMENT ((int32_t)0x80960005)
 #define USER_NO_EVENT ((int32_t)0x80960007)
@@ -46,33 +48,43 @@ static int next_id=1;
 static int new_id(void) { pthread_mutex_lock(&lock); int id=next_id++; pthread_mutex_unlock(&lock); return id; }
 static void note(const char *what) { printf("Runtime: %s\n",what); }
 
-/* ---- UserService ---- */
-static int login_event_pending=1;
+/* ---- UserService ----
+ * User 1 (USER_ID) is logged in from the start; user 2 (USER_ID_2) once a second gamepad has
+ * connected (runtime_pad_second_user), as a second player switching a controller on does on a PS4,
+ * and stays logged in after: a pad that drops reads disconnected, which the game reports itself. */
+static int login_events_sent; /* users whose LOGIN event went out */
+static int logged_in(int32_t id) { return id==USER_ID || (id==USER_ID_2 && runtime_pad_second_user()); }
 static ABI int32_t user_initialize(const void *params) { (void)params; note("UserService initialized (user 1 logged in)"); return 0; }
 static ABI int32_t user_terminate(void) { return 0; }
 static ABI int32_t user_initial(int32_t *id) { if (!id) return USER_INVALID_ARGUMENT; *id=USER_ID; return 0; }
+/* sceUserServiceGetLoginUserIdList(list): four ids, -1 past the logged-in ones. */
 static ABI int32_t user_list(int32_t *ids) {
     if (!ids) return USER_INVALID_ARGUMENT;
-    ids[0]=USER_ID; ids[1]=ids[2]=ids[3]=-1; return 0;
+    ids[0]=USER_ID; ids[1]=logged_in(USER_ID_2) ? USER_ID_2 : -1; ids[2]=ids[3]=-1; return 0;
 }
 static ABI int32_t user_name(int32_t id,char *name,uint64_t size) {
-    if (id!=USER_ID || !name) return USER_INVALID_ARGUMENT;
-    if (sizeof USER_NAME>size) return (int32_t)0x8096000a; /* BUFFER_TOO_SHORT */
-    strcpy(name,USER_NAME); return 0;
+    if (!logged_in(id) || !name) return USER_INVALID_ARGUMENT;
+    const char *n=id==USER_ID ? USER_NAME : USER_NAME_2;
+    if (strlen(n)+1>size) return (int32_t)0x8096000a; /* BUFFER_TOO_SHORT */
+    strcpy(name,n); return 0;
 }
-/* sceUserServiceGetUserColor(user, color): 0 blue, 1 red, 2 green, 3 pink. The one user is
- * player 1, blue (shadPS4 keeps that 1-based, as its pad code reads it, but returns it raw). */
+/* sceUserServiceGetUserColor(user, color): 0 blue, 1 red, 2 green, 3 pink. User 1 is player 1,
+ * blue, user 2 red (shadPS4 keeps that 1-based, as its pad code reads it, but returns it raw). */
 static ABI int32_t user_color(int32_t id,int32_t *color) {
-    if (id!=USER_ID || !color) return USER_INVALID_ARGUMENT;
-    *color=0; return 0;
+    if (!logged_in(id) || !color) return USER_INVALID_ARGUMENT;
+    *color=id==USER_ID ? 0 : 1; return 0;
 }
+/* sceUserServiceGetEvent(event{type, user}): LOGIN (0) once per user as it logs in. */
 static ABI int32_t user_event(int32_t *event) {
     if (!event) return USER_INVALID_ARGUMENT;
+    int32_t user=-1;
     pthread_mutex_lock(&lock);
-    int pending=login_event_pending; login_event_pending=0;
+    if (!(login_events_sent & 1)) { login_events_sent|=1; user=USER_ID; }
+    else if (!(login_events_sent & 2) && logged_in(USER_ID_2)) { login_events_sent|=2; user=USER_ID_2; }
     pthread_mutex_unlock(&lock);
-    if (!pending) return USER_NO_EVENT;
-    event[0]=0; event[1]=USER_ID; /* LOGIN */
+    if (user<0) return USER_NO_EVENT;
+    if (user==USER_ID_2) note("UserService: user 2 logged in (second gamepad)");
+    event[0]=0; event[1]=user; /* LOGIN */
     return 0;
 }
 
@@ -246,8 +258,8 @@ static ABI int32_t np_parental(int32_t id,int32_t user,int8_t *age,void *info) {
 #define NP_USER_NOT_FOUND ((int32_t)0x80550007)
 static ABI int32_t np_account_id(int32_t user,uint64_t *account) {
     if (!account || user==-1) return NP_INVALID_ARGUMENT;
-    if (user!=USER_ID) { *account=0; return NP_USER_NOT_FOUND; }
-    *account=NP_ACCOUNT_ID; return 0;
+    if (!logged_in(user)) { *account=0; return NP_USER_NOT_FOUND; }
+    *account=NP_ACCOUNT_ID+(uint64_t)(user-USER_ID); return 0;
 }
 
 /* ---- Common dialogs: nothing is displayed; an opened dialog finishes. ---- */

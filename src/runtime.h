@@ -122,6 +122,16 @@ int runtime_kernel_neo_mode(void);
 /* skip_intro's title screen press (runtime_pad.c): the AvPlayer reports title.mp4 starting (1) and
  * its player going away (0). */
 void runtime_pad_title_movie(int playing);
+/* The controller speaker (runtime_pad.c), played by AudioOut's pad speaker ports: the open gamepad's
+ * kind when it is a DualShock 4 or DualSense on USB, where the speaker is behind the pad's own USB
+ * audio device, else RUNTIME_PAD_SPEAKER_NONE. */
+enum { RUNTIME_PAD_SPEAKER_NONE, RUNTIME_PAD_SPEAKER_DS4, RUNTIME_PAD_SPEAKER_DUALSENSE };
+int runtime_pad_speaker(void);
+/* 1 while a pad speaker port plays on the controller's audio device: a DualSense sends that audio to
+ * its speaker instead of its headphone jack. 0 puts the jack back. */
+void runtime_pad_speaker_route(int on);
+/* 1 once a second gamepad has connected (runtime_pad.c): UserService then logs user 2 in. */
+int runtime_pad_second_user(void);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* Offline networking (POSIX sockets, libSceHttp extras), PSN libraries and their dialogs, and

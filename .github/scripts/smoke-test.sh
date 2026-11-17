@@ -79,6 +79,9 @@ mkdir -p game
 printf 'not a boot file' >game/boot-linked.bin
 : >game/content.bin
 cp release.txt game/release.txt
+# The stamp of the dump's eboot.bin the image was prepared from (setup.cpp source_stamp): without
+# it the launcher prepares game/ again first, which fails on the empty dump.
+stat -c '%s %Y' "$work/dump/eboot.bin" >game/source.txt
 printf '[paths]\ngame=%s\nsave=%s\n' "$work/dump" "$work/save" >paths.ini
 status=0
 ./resogun </dev/null >"$work/launch.out" 2>&1 || status=$?

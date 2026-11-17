@@ -20,6 +20,8 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 int resogun_gpu_text_input_begin(const char *text, const char *prompt) { (void)text; (void)prompt; return 0; }
 int resogun_gpu_text_input_poll(char *text, uint64_t size) { (void)text; (void)size; return 0; }
 void resogun_gpu_common_dialog_initialized(void) {}
+static int second_pad;
+int runtime_pad_second_user(void) { return second_pad; }
 /* Not the repository's user/ (run.py's save folder: a real trophies.dat there failed the checks). */
 #define MOCK_USER "out/test_services_no_user"
 static char mock_user_dir[512]=MOCK_USER;
@@ -107,6 +109,19 @@ int main(void) {
     assert(keyboard_close(1)==0 && keyboard_close(1)==IME_NOT_OPENED);
     int32_t color=-1;
     assert(user_color(USER_ID,&color)==0 && color==0 && user_color(7,&color)==USER_INVALID_ARGUMENT);
+    /* User 2 logs in with the second gamepad: one LOGIN event, then in the list, red, named. */
+    int32_t users[4], event[2];
+    char name[32];
+    assert(user_event(event)==0 && event[0]==0 && event[1]==USER_ID && user_event(event)==USER_NO_EVENT);
+    assert(user_list(users)==0 && users[0]==USER_ID && users[1]==-1);
+    assert(user_color(USER_ID_2,&color)==USER_INVALID_ARGUMENT);
+    second_pad=1;
+    assert(user_event(event)==0 && event[0]==0 && event[1]==USER_ID_2 && user_event(event)==USER_NO_EVENT);
+    assert(user_list(users)==0 && users[0]==USER_ID && users[1]==USER_ID_2 && users[2]==-1);
+    assert(user_color(USER_ID_2,&color)==0 && color==1);
+    assert(user_name(USER_ID_2,name,sizeof(name))==0 && !strcmp(name,USER_NAME_2));
+    uint64_t account1=0, account2=0;
+    assert(np_account_id(USER_ID,&account1)==0 && np_account_id(USER_ID_2,&account2)==0 && account1!=account2);
 
     /* MsgDialog: a user message finishes with OK; a progress bar runs until closed. */
     assert(msg_init()==0);

@@ -489,6 +489,11 @@ public:
         return image_view_min_lod;
     }
 
+    /// resogun: whether VK_EXT_full_screen_exclusive is enabled (Windows).
+    bool IsFullScreenExclusiveSupported() const {
+        return full_screen_exclusive;
+    }
+
     /// Returns whether the device can report memory usage.
     bool CanReportMemoryUsage() const {
         return supports_memory_budget;
@@ -589,6 +594,7 @@ private:
     bool pipeline_executable_properties{}; // resogun: RESOGUN_WAVE_STATS=1 (vk_wave_stats.h)
     bool amd_shader_info{};                // resogun: with it, VK_AMD_shader_info when present
     bool supports_memory_budget{};
+    bool full_screen_exclusive{}; // resogun: VK_EXT_full_screen_exclusive
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;

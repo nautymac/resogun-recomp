@@ -5,6 +5,11 @@
  * Gamepads map by position: the bottom face button is Cross, right Circle, left Square, top
  * Triangle (an Xbox pad's A B X Y). View/Back clicks the touchpad; a DualSense's own touchpad works.
  *
+ * Two players (local co-op): the first gamepad connected is user 1's, the second user 2's
+ * (runtime_services.c logs user 2 in when that pad first connects, as switching on a second
+ * controller does on a PS4). A pad keeps its slot while connected; a pad that comes back fills the
+ * first free slot. The keyboard always plays for user 1.
+ *
  * Keyboard layout, by key position:
  *   WASD left stick, IJKL right stick, arrow keys d-pad (menus),
  *   Space/Enter Cross, Escape/Backspace/; Circle, F Square, H Triangle,
@@ -26,7 +31,7 @@
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
 #define ERR_ALREADY_OPENED ((int32_t)0x80920004)
 #define ERR_NOT_INITIALIZED ((int32_t)0x80920005)
-#define PAD_HANDLE 1
+#define PADS 2 /* users 1 and 2; the handle of user n's pad is n */
 
 enum {
     BTN_L3=0x2, BTN_R3=0x4, BTN_OPTIONS=0x8, BTN_UP=0x10, BTN_RIGHT=0x20, BTN_DOWN=0x40, BTN_LEFT=0x80,
@@ -67,17 +72,24 @@ _Static_assert(__builtin_offsetof(PadData,timestamp)==80,"OrbisPadData timestamp
 _Static_assert(sizeof(ControllerInfo)==28,"OrbisPadControllerInformation layout");
 
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-static int initialized, opened, sdl_ready;
+static int initialized, opened[PADS], sdl_ready;
 static size_t reads, vibrations;
+/* The slot of an open handle (0 for user 1), or -1. */
+static int slot_of(int32_t handle) { return handle>=1 && handle<=PADS && opened[handle-1] ? handle-1 : -1; }
 /* The host side runs on its own thread (host_thread): opening, closing and even reading an SDL
  * gamepad can block for hundreds of ms while a Bluetooth pad connects or drops (SDL holds its
  * joystick lock meanwhile), and on the game's thread that froze the frame. The thread samples every
  * millisecond and a read copies the latest sample, so the game's threads make no gamepad calls. */
 static pthread_mutex_t host_lock=PTHREAD_MUTEX_INITIALIZER;
-static PadData host_sample;           /* under host_lock */
-static char gamepad_name[64]="none";  /* under host_lock */
-static struct { uint8_t large, small; uint32_t serial; } rumble; /* under host_lock */
+static PadData host_sample[PADS];     /* under host_lock */
+static char gamepad_name[PADS][64]={"none","none"}; /* under host_lock */
+static struct { uint8_t large, small; uint32_t serial; } rumble[PADS]; /* under host_lock */
+static struct { uint8_t r, g, b; uint32_t serial; } light[PADS];       /* under host_lock */
 static int reconnect_wanted;          /* atomic: the pad file's reconnect token */
+static int second_seen;               /* atomic: user 2's slot has had a gamepad */
+static int speaker_kind;              /* RUNTIME_PAD_SPEAKER_* of user 1's gamepad (host thread) */
+static int speaker_wanted;            /* runtime_pad_speaker_route */
+static int speaker_routed;            /* what the open DualSense was last told; -1: nothing yet */
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 /* Pad calls run on the game's own threads, so a slow one is a late frame: calls over 2 ms are
@@ -108,8 +120,9 @@ static uint16_t touch_axis(float v, int max) {
  * stays at least CLICK_HOLD_US, and the touch lingers CLICK_TAIL_US after the release, as a real
  * finger would. */
 enum { CLICK_LEAD_US=50000, CLICK_HOLD_US=50000, CLICK_TAIL_US=100000 };
-static struct { bool active; uint64_t pressed, released; } click;
-static void play_click(PadData *d) {
+typedef struct { bool active; uint64_t pressed, released; } Click;
+static Click clicks[PADS];
+static void play_click(PadData *d, Click *c) {
     const uint64_t now=d->timestamp;
     bool source=(d->buttons & CLICK)!=0;
     d->buttons&=~CLICK;
@@ -117,14 +130,14 @@ static void play_click(PadData *d) {
         d->buttons&=~BTN_TOUCHPAD;
         source=true;
     }
-    if (source && (!click.active || click.released)) { click.active=true; click.pressed=now; click.released=0; }
-    else if (!source && click.active && !click.released) click.released=now;
-    if (!click.active) return;
-    const uint64_t down=click.pressed+CLICK_LEAD_US;
+    if (source && (!c->active || c->released)) { c->active=true; c->pressed=now; c->released=0; }
+    else if (!source && c->active && !c->released) c->released=now;
+    if (!c->active) return;
+    const uint64_t down=c->pressed+CLICK_LEAD_US;
     uint64_t up=down+CLICK_HOLD_US;
-    if (!click.released) up=UINT64_MAX;
-    else if (click.released>up) up=click.released;
-    if (now>=up && now-up>=CLICK_TAIL_US) { click.active=false; return; }
+    if (!c->released) up=UINT64_MAX;
+    else if (c->released>up) up=c->released;
+    if (now>=up && now-up>=CLICK_TAIL_US) { c->active=false; return; }
     if (d->touch_count<2) {
         d->touches[d->touch_count]=(PadTouch){.x=960,.y=471,.id=d->touch_count};
         ++d->touch_count;
@@ -132,30 +145,83 @@ static void play_click(PadData *d) {
     if (now>=down && now<up) d->buttons|=BTN_TOUCHPAD;
 }
 
-/* Host thread: the open gamepad, closing it when it is gone or the pad file asked for a reconnect,
- * and looking for one every 100 ms while there is none. */
-static SDL_Gamepad *host_gamepad(SDL_Gamepad *g, uint64_t now, uint64_t *next_scan, uint8_t *connected_count) {
-    if (g && (__atomic_exchange_n(&reconnect_wanted,0,__ATOMIC_ACQ_REL) || !SDL_GamepadConnected(g))) {
-        SDL_CloseGamepad(g); g=NULL;
-        pthread_mutex_lock(&host_lock); strcpy(gamepad_name,"none"); pthread_mutex_unlock(&host_lock);
-        puts("Runtime: gamepad closed");
+/* Host thread: the open gamepads, closing those that are gone (all of them when the pad file asked
+ * for a reconnect), and every 100 ms while a slot is empty opening a connected gamepad no slot has. */
+static void host_gamepads(SDL_Gamepad **g, uint64_t now, uint64_t *next_scan, uint8_t *connected_count) {
+    const bool reconnect=__atomic_exchange_n(&reconnect_wanted,0,__ATOMIC_ACQ_REL)!=0;
+    bool empty=false;
+    for (int i=0;i<PADS;++i) {
+        if (g[i] && (reconnect || !SDL_GamepadConnected(g[i]))) {
+            SDL_CloseGamepad(g[i]); g[i]=NULL;
+            pthread_mutex_lock(&host_lock); strcpy(gamepad_name[i],"none"); pthread_mutex_unlock(&host_lock);
+            printf("Runtime: gamepad %d closed\n",i+1);
+        }
+        if (!g[i]) empty=true;
     }
-    if (g || now<*next_scan) return g;
+    if (!empty || now<*next_scan) return;
     *next_scan=now+100000;
-    __atomic_store_n(&reconnect_wanted,0,__ATOMIC_RELEASE);
     int count=0;
     SDL_JoystickID *ids=SDL_GetGamepads(&count);
-    if (ids && count>0 && (g=SDL_OpenGamepad(ids[0]))) {
-        ++*connected_count;
-        const char *name=SDL_GetGamepadName(g);
+    for (int n=0;ids && n<count;++n) {
+        int slot=-1;
+        for (int i=PADS-1;i>=0;--i) {
+            if (g[i] && SDL_GetGamepadID(g[i])==ids[n]) { slot=-2; break; }
+            if (!g[i]) slot=i;
+        }
+        if (slot<0 || !(g[slot]=SDL_OpenGamepad(ids[n]))) continue;
+        ++connected_count[slot];
+        if (slot==1) __atomic_store_n(&second_seen,1,__ATOMIC_RELEASE);
+        const char *name=SDL_GetGamepadName(g[slot]);
         pthread_mutex_lock(&host_lock);
-        snprintf(gamepad_name,sizeof(gamepad_name),"%s",name ? name : "gamepad");
+        snprintf(gamepad_name[slot],sizeof(gamepad_name[slot]),"%s",name ? name : "gamepad");
+        ++light[slot].serial; /* the user's color goes on the new pad */
         pthread_mutex_unlock(&host_lock);
-        printf("Runtime: gamepad connected: %s\n",name ? name : "gamepad");
+        printf("Runtime: gamepad %d connected: %s\n",slot+1,name ? name : "gamepad");
     }
     SDL_free(ids);
-    return g;
 }
+int runtime_pad_second_user(void) { return __atomic_load_n(&second_seen,__ATOMIC_ACQUIRE); }
+/* Which controller speaker a gamepad has: a DualShock 4 or DualSense on USB shows up as a USB audio
+ * device too (over Bluetooth its audio travels in HID reports, which is not done here). */
+static int speaker_kind_of(SDL_Gamepad *g) {
+    if (!g || SDL_GetGamepadConnectionState(g)!=SDL_JOYSTICK_CONNECTION_WIRED) return RUNTIME_PAD_SPEAKER_NONE;
+    switch (SDL_GetGamepadType(g)) {
+    case SDL_GAMEPAD_TYPE_PS4: return RUNTIME_PAD_SPEAKER_DS4;
+    case SDL_GAMEPAD_TYPE_PS5: return RUNTIME_PAD_SPEAKER_DUALSENSE;
+    default: return RUNTIME_PAD_SPEAKER_NONE;
+    }
+}
+/* A DualSense's USB audio output plays on its headphone jack until an output report (SDL's
+ * DS5EffectsState_t, report 0x02 after the id) selects another path: audio control byte 7 bits 4-5,
+ * 3 = the speaker takes the right channel and the jack nothing, 0 = the jack takes both channels.
+ * The speaker volume (byte 5) is set with it: the PS5 keeps it within 0x3d..0x64. */
+static int dualsense_speaker(SDL_Gamepad *g, int on) {
+    uint8_t effect[47]={0};
+    effect[0]=on ? 0x80|0x20 : 0x80; /* valid flags: audio control, speaker volume */
+    effect[5]=0x64;
+    effect[7]=on ? 3<<4 : 0;
+    return SDL_SendGamepadEffect(g,effect,sizeof(effect));
+}
+/* Host thread: keeps the open gamepad's speaker kind and a DualSense's audio path current. */
+static void speaker_update(SDL_Gamepad *g, SDL_Gamepad **last) {
+    if (g!=*last) {
+        *last=g;
+        __atomic_store_n(&speaker_routed,-1,__ATOMIC_RELEASE);
+        const int kind=speaker_kind_of(g);
+        __atomic_store_n(&speaker_kind,kind,__ATOMIC_RELEASE);
+        if (kind) printf("Runtime: controller speaker available (%s on USB)\n",kind==RUNTIME_PAD_SPEAKER_DS4 ? "DualShock 4" : "DualSense");
+    }
+    const int want=__atomic_load_n(&speaker_wanted,__ATOMIC_ACQUIRE);
+    if (!g || __atomic_load_n(&speaker_kind,__ATOMIC_ACQUIRE)!=RUNTIME_PAD_SPEAKER_DUALSENSE) return;
+    const int routed=__atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE);
+    if (want==routed || (!want && routed<0)) return; /* a pad never moved keeps its jack untouched */
+    if (!dualsense_speaker(g,want)) printf("Runtime: DualSense audio path not set (%s)\n",SDL_GetError());
+    else printf("Runtime: DualSense audio sent to its %s\n",want ? "speaker" : "headphone jack");
+    __atomic_store_n(&speaker_routed,want,__ATOMIC_RELEASE); /* tried once per change, not every ms */
+}
+int runtime_pad_speaker(void) { return __atomic_load_n(&speaker_kind,__ATOMIC_ACQUIRE); }
+void runtime_pad_speaker_route(int on) { __atomic_store_n(&speaker_wanted,on ? 1 : 0,__ATOMIC_RELEASE); }
+
 /* PS4 button names for scripted input (RESOGUN_PAD_FILE). */
 static const struct { const char *name; uint32_t ps; } ps_names[]={
     {"cross",BTN_CROSS}, {"circle",BTN_CIRCLE}, {"square",BTN_SQUARE}, {"triangle",BTN_TRIANGLE},
@@ -212,14 +278,15 @@ static uint32_t sample_keyboard(PadData *d, const bool *keys) {
     return pressed;
 }
 
-/* Host thread: the gamepad and keyboard as one PadData (no timestamp). */
-static void host_read(PadData *d, SDL_Gamepad *g, uint8_t connected_count) {
+/* Host thread: a slot's gamepad as one PadData (no timestamp), with the keyboard in slot 0. User
+ * 1's pad is always connected (the keyboard plays without a gamepad); user 2's while it has one. */
+static void host_read(PadData *d, int slot, SDL_Gamepad *g, uint8_t connected_count) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
-    d->connected=1; d->connected_count=connected_count ? connected_count : 1;
+    d->connected=!slot || g; d->connected_count=connected_count ? connected_count : 1;
     if (resogun_gpu_overlay_captures_input()) return; /* a dialog is open: neutral input */
-    const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    const bool *k=!slot && SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     if (g) {
         for (size_t i=0;i<pad_map.count;++i)
             if (SDL_GetGamepadButton(g,(SDL_GamepadButton)pad_map.entries[i].source)) d->buttons|=pad_map.entries[i].ps;
@@ -248,35 +315,57 @@ static void host_read(PadData *d, SDL_Gamepad *g, uint8_t connected_count) {
     if (k) sample_keyboard(d,k);
 }
 
-/* Host thread: Select (Back/View/Share) held for SELECT_HOLD_US opens the Display Settings panel.
- * What Select presses (the touchpad click) is held back while it is down and
- * played as a SELECT_TAP_US tap when it is let go sooner; after the panel opened it is dropped. */
-enum { SELECT_HOLD_US=2000000, SELECT_TAP_US=60000 };
-static void select_hold(PadData *d, SDL_Gamepad *g, uint64_t now) {
-    static uint64_t since, tap_until;
-    static bool opened; /* this hold opened the panel, or an overlay had the input: no tap */
+/* Host thread: Select (Back/View/Share) or Start (Options/Menu) held alone for MENU_HOLD_US opens the
+ * Display Settings panel (as F10); Select and Start down together ask whether to close the game (the
+ * exit prompt, as F4). What each button presses (Select the touchpad click, Start Options) is held
+ * back while it is down and played as a MENU_TAP_US tap when it is let go without a shortcut; after
+ * a shortcut, or while an overlay had the input, it is dropped. */
+enum { MENU_HOLD_US=2000000, MENU_TAP_US=60000 };
+typedef struct {
+    SDL_GamepadButton button;
+    const char *name;
+    uint64_t since, tap_until; /* down since (0: up); its tap plays until */
+    bool used;                 /* this press fired a shortcut or met an overlay: no tap */
+} MenuButton;
+/* One button's state for this sample: true while it is down, its press held back from `d`. */
+static bool menu_button(MenuButton *b, PadData *d, SDL_Gamepad *g, uint64_t now) {
     uint32_t bits=0;
     for (size_t i=0;i<pad_map.count;++i)
-        if (pad_map.entries[i].source==SDL_GAMEPAD_BUTTON_BACK) bits|=pad_map.entries[i].ps;
-    const bool down=g && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_BACK);
-    if (down) {
-        if (!since) { since=now; opened=false; }
-        if (resogun_gpu_overlay_captures_input()) opened=true;
+        if (pad_map.entries[i].source==(int)b->button) bits|=pad_map.entries[i].ps;
+    if (g && SDL_GetGamepadButton(g,b->button)) {
+        if (!b->since) { b->since=now; b->used=false; }
+        if (resogun_gpu_overlay_captures_input()) b->used=true;
         d->buttons&=~bits;
-        if (!opened && now-since>=SELECT_HOLD_US) {
-            opened=true;
-            if (!resogun_display_settings_is_open()) {
-                resogun_display_settings_open();
-                puts("Runtime: Select held; Display Settings opened");
-            }
-        }
-        return;
+        return true;
     }
-    if (since) {
-        if (!opened) tap_until=now+SELECT_TAP_US;
-        since=0;
+    if (b->since) {
+        if (!b->used) b->tap_until=now+MENU_TAP_US;
+        b->since=0;
     }
-    if (now<tap_until) d->buttons|=bits;
+    if (now<b->tap_until) d->buttons|=bits;
+    return false;
+}
+static void menu_held(MenuButton *b, uint64_t now) {
+    if (b->used || now-b->since<MENU_HOLD_US) return;
+    b->used=true;
+    if (resogun_display_settings_is_open()) return;
+    resogun_display_settings_open();
+    printf("Runtime: %s held; Display Settings opened\n",b->name);
+}
+/* Each player's pad has the shortcuts, on its own buttons. */
+static void menu_buttons(PadData *d, int slot, SDL_Gamepad *g, uint64_t now) {
+    static MenuButton select[PADS], start[PADS];
+    MenuButton *se=&select[slot], *st=&start[slot];
+    se->button=SDL_GAMEPAD_BUTTON_BACK; se->name="Select";
+    st->button=SDL_GAMEPAD_BUTTON_START; st->name="Start";
+    const bool select_down=menu_button(se,d,g,now), start_down=menu_button(st,d,g,now);
+    if (select_down && start_down) {
+        if (se->used && st->used) return;
+        se->used=st->used=true;
+        resogun_exit_prompt_open();
+        puts("Runtime: Select+Start; asking whether to close the game");
+    } else if (select_down) menu_held(se,now);
+    else if (start_down) menu_held(st,now);
 }
 
 /* Game's pad read (sample): settings.ini title_back_exits. Back (Circle: B, Escape, Backspace, or
@@ -299,29 +388,39 @@ static void title_back(PadData *d) {
 }
 
 /* Host thread: samples every millisecond (SDL_DelayNS waits on a high resolution timer) and
- * passes the game's vibration on: when it changes, and every 500 ms while the motors run, as each
- * rumble is sent for 1000 ms. */
+ * passes each user's vibration and light bar color on: when they change, and the vibration every
+ * 500 ms while the motors run, as each rumble is sent for 1000 ms. */
 static void *host_thread(void *arg) {
     (void)arg;
-    SDL_Gamepad *g=NULL;
-    uint64_t next_scan=0, rumble_sent=0;
-    uint32_t rumble_serial=0;
-    uint8_t connected_count=0;
+    SDL_Gamepad *g[PADS]={NULL}, *speaker_pad=NULL;
+    uint64_t next_scan=0, rumble_sent[PADS]={0};
+    uint32_t rumble_serial[PADS]={0}, light_serial[PADS]={0};
+    uint8_t connected_count[PADS]={0};
     for (;;) {
         const uint64_t start=now_us();
         if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
-        if (sdl_ready>0) g=host_gamepad(g,start,&next_scan,&connected_count);
-        PadData d;
-        host_read(&d,g,connected_count);
-        select_hold(&d,g,start);
+        if (sdl_ready>0) host_gamepads(g,start,&next_scan,connected_count);
+        speaker_update(g[0],&speaker_pad);
+        PadData d[PADS];
+        for (int i=0;i<PADS;++i) {
+            host_read(&d[i],i,g[i],connected_count[i]);
+            menu_buttons(&d[i],i,g[i],start);
+        }
         pthread_mutex_lock(&host_lock);
-        host_sample=d;
-        const uint8_t large=rumble.large, small=rumble.small;
-        const uint32_t serial=rumble.serial;
+        memcpy(host_sample,d,sizeof(d));
+        __typeof__(rumble) r; __typeof__(light) l;
+        memcpy(r,rumble,sizeof(r)); memcpy(l,light,sizeof(l));
         pthread_mutex_unlock(&host_lock);
-        if (g && (serial!=rumble_serial || ((large || small) && start-rumble_sent>=500000))) {
-            SDL_RumbleGamepad(g,(uint16_t)(large*257u),(uint16_t)(small*257u),1000);
-            rumble_serial=serial; rumble_sent=start;
+        for (int i=0;i<PADS;++i) {
+            if (!g[i]) continue;
+            if (r[i].serial!=rumble_serial[i] || ((r[i].large || r[i].small) && start-rumble_sent[i]>=500000)) {
+                SDL_RumbleGamepad(g[i],(uint16_t)(r[i].large*257u),(uint16_t)(r[i].small*257u),1000);
+                rumble_serial[i]=r[i].serial; rumble_sent[i]=start;
+            }
+            if (l[i].serial!=light_serial[i]) {
+                if (l[i].r || l[i].g || l[i].b) SDL_SetGamepadLED(g[i],l[i].r,l[i].g,l[i].b);
+                light_serial[i]=l[i].serial;
+            }
         }
         note_call(SLOW_HOST,start);
         SDL_DelayNS(1000000);
@@ -332,9 +431,10 @@ static void *host_thread(void *arg) {
 /* RESOGUN_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
  * options touchpad up down left right) are held while listed; lx= ly= rx= ry= (0..255) override
- * the sticks; reconnect closes the gamepad once per edit and the host thread opens
- * it again, as after a real reconnect. An empty file releases everything. */
-static struct { uint32_t buttons; int stick[4]; } injected={0,{-1,-1,-1,-1}};
+ * the sticks; either prefixed with p2: (p2:cross, p2:lx=0) is user 2's; reconnect closes the
+ * gamepads once per edit and the host thread opens them again, as after a real reconnect. An empty
+ * file releases everything. */
+static struct { uint32_t buttons; int stick[4]; } injected[PADS]={{0,{-1,-1,-1,-1}},{0,{-1,-1,-1,-1}}};
 static int replay_armed;      /* 1 while a RESOGUN_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 static void read_inject(void) {
@@ -357,20 +457,27 @@ static void read_inject(void) {
     FILE *f=fopen(path,"r");
     if (!f) return;
     static const char *sticks[]={"lx=","ly=","rx=","ry="};
-    injected.buttons=0;
-    for (int i=0;i<4;++i) injected.stick[i]=-1;
+    for (int u=0;u<PADS;++u) {
+        injected[u].buttons=0;
+        for (int i=0;i<4;++i) injected[u].stick[i]=-1;
+    }
     char token[64];
     int reconnect=0;
     while (fscanf(f,"%63s",token)==1) {
         if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* RESOGUN_PAD_REPLAY */
         if (!strcmp(token,"reconnect")) reconnect=1;
-        for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!strcmp(token,ps_names[i].name)) injected.buttons|=ps_names[i].ps;
-        for (int i=0;i<4;++i) if (!strncmp(token,sticks[i],3)) { int v=atoi(token+3); injected.stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
+        const int u=!strncmp(token,"p2:",3);
+        const char *t=token+(u ? 3 : 0);
+        for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!strcmp(t,ps_names[i].name)) injected[u].buttons|=ps_names[i].ps;
+        for (int i=0;i<4;++i) if (!strncmp(t,sticks[i],3)) { int v=atoi(t+3); injected[u].stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
     }
     fclose(f);
-    if (reconnect) __atomic_store_n(&reconnect_wanted,1,__ATOMIC_RELEASE); /* host_gamepad closes it */
-    printf("Runtime: pad file: buttons 0x%x sticks %d %d %d %d\n",injected.buttons,
-           injected.stick[0],injected.stick[1],injected.stick[2],injected.stick[3]);
+    if (reconnect) __atomic_store_n(&reconnect_wanted,1,__ATOMIC_RELEASE); /* host_gamepads closes them */
+    for (int u=0;u<PADS;++u) {
+        const int *k=injected[u].stick;
+        if (!u || injected[u].buttons || k[0]>=0 || k[1]>=0 || k[2]>=0 || k[3]>=0)
+            printf("Runtime: pad file: user %d buttons 0x%x sticks %d %d %d %d\n",u+1,injected[u].buttons,k[0],k[1],k[2],k[3]);
+    }
 }
 /* RESOGUN_PAD_RECORD=<file>: F9 starts and stops recording the pad state (gamepad or keyboard) with
  * the time since F9; RESOGUN_PAD_REPLAY=<file> plays such a recording back, started by the token
@@ -472,8 +579,8 @@ static void title_press(PadData *d) {
  * depth and Up/Down the convergence, repeated while held; the values are saved when both are let go.
  * The game sees neither shoulder nor the D-pad meanwhile (a direction still held afterwards stays
  * hidden until released). A lone shoulder reaches the game STEREO_JOIN_US late, the time to press
- * the other one; a tap shorter than that still arrives, as a STEREO_TAP_US press. Called with the
- * pad lock held. */
+ * the other one; a tap shorter than that still arrives, as a STEREO_TAP_US press. Player 1's
+ * pad only, with the pad lock held. */
 enum { STEREO_JOIN_US=60000, STEREO_TAP_US=50000, STEREO_REPEAT_FIRST_US=400000, STEREO_REPEAT_US=150000 };
 static void stereo_combo(PadData *d) {
     static uint64_t lone_since, tap_until, next_repeat;
@@ -515,34 +622,39 @@ static void stereo_combo(PadData *d) {
 }
 
 /* After a dialog closes, buttons still held (the Cross that accepted a name) stay hidden until
- * released: the game would take them as a new press. */
-static int hold_after_capture;
-static void sample(PadData *d) {
+ * released: the game would take them as a new press. A replay and the title screen's presses are
+ * user 1's; the pad file presses for either user. */
+static int hold_after_capture[PADS];
+static void sample(PadData *d, int slot) {
     pthread_mutex_lock(&host_lock);
-    *d=host_sample;
+    *d=host_sample[slot];
     pthread_mutex_unlock(&host_lock);
-    if (!d->connected) { /* before the host thread's first sample */
+    if (!d->connected_count) { /* before the host thread's first sample */
         d->left_x=d->left_y=d->right_x=d->right_y=128;
         d->orientation[3]=1.0f;
-        d->connected=d->connected_count=1;
+        d->connected=!slot; d->connected_count=1;
     }
     d->timestamp=now_us();
-    if (resogun_gpu_overlay_captures_input()) { hold_after_capture=1; click.active=false; title_back(d); return; }
-    record_sample(d); /* the click sources as they are: a replay plays them again */
+    if (resogun_gpu_overlay_captures_input()) {
+        hold_after_capture[slot]=1; clicks[slot].active=false;
+        if (!slot) title_back(d);
+        return;
+    }
+    if (!slot) record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();
-    replay_sample(d);
-    d->buttons|=injected.buttons;
-    if (injected.buttons & BTN_L2) d->l2=255;
-    if (injected.buttons & BTN_R2) d->r2=255;
+    if (!slot) replay_sample(d);
+    d->buttons|=injected[slot].buttons;
+    if (injected[slot].buttons & BTN_L2) d->l2=255;
+    if (injected[slot].buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
-    for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
-    stereo_combo(d);
-    title_back(d);
-    play_click(d);
-    title_press(d);
-    if (hold_after_capture) {
+    for (int i=0;i<4;++i) if (injected[slot].stick[i]>=0) *axes[i]=(uint8_t)injected[slot].stick[i];
+    if (!slot) stereo_combo(d);
+    if (!slot) title_back(d);
+    play_click(d,&clicks[slot]);
+    if (!slot) title_press(d);
+    if (hold_after_capture[slot]) {
         if (d->buttons) d->buttons=0;
-        else hold_after_capture=0;
+        else hold_after_capture[slot]=0;
     }
 }
 
@@ -552,66 +664,85 @@ static void start_host_thread(void) {
     else puts("Runtime: pad host thread failed to start; the pad reads neutral");
 }
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }
+/* scePadOpen(user, type, index, param): one standard (0) or special (2) port per user, index 0;
+ * the handle is the user's id. User 2's pad opens without a gamepad too and reads disconnected. */
 static ABI int32_t pad_open(int32_t user, int32_t type, int32_t index, const void *param) {
     (void)param;
     if (!initialized) return ERR_NOT_INITIALIZED;
-    if (user!=1) return ERR_INVALID_ARG;
+    if (user<1 || user>PADS) return ERR_INVALID_ARG;
     if (type!=0 && type!=2) return ERR_INVALID_ARG; /* standard / special port */
     if (index) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
-    int already=opened; opened=1;
+    int already=opened[user-1]; opened[user-1]=1;
     pthread_mutex_unlock(&lock);
     if (already) return ERR_ALREADY_OPENED;
     static pthread_once_t host_started=PTHREAD_ONCE_INIT;
     pthread_once(&host_started,start_host_thread);
-    puts("Runtime: pad opened for user 1 (SDL gamepad or keyboard)");
-    return PAD_HANDLE;
+    printf("Runtime: pad opened for user %d (%s)\n",user,user==1 ? "first gamepad or keyboard" : "second gamepad");
+    return user;
 }
 static ABI int32_t pad_close(int32_t handle) {
-    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
-    opened=0; return 0;
+    const int slot=slot_of(handle);
+    if (slot<0) return ERR_INVALID_HANDLE;
+    opened[slot]=0; return 0;
 }
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
-    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    const int slot=slot_of(handle);
+    if (slot<0) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     const uint64_t start=now_us();
     pthread_mutex_lock(&lock);
-    sample(data); ++reads;
+    sample(data,slot); ++reads;
     note_call(SLOW_READ,start);
     pthread_mutex_unlock(&lock);
     return 0;
 }
 static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
-    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    const int slot=slot_of(handle);
+    if (slot<0) return ERR_INVALID_HANDLE;
     if (!info) return ERR_INVALID_ARG;
     memset(info,0,sizeof(*info));
     info->pixel_density=44.86f; info->resolution_x=1920; info->resolution_y=943;
     info->dead_zone_left=info->dead_zone_right=2;
-    info->connection_type=0; info->connected=1; info->device_class=0;
+    info->connection_type=0; info->device_class=0;
     const uint64_t start=now_us();
     pthread_mutex_lock(&host_lock);
-    info->connected_count=host_sample.connected_count ? host_sample.connected_count : 1;
+    const PadData *h=&host_sample[slot];
+    info->connected=h->connected_count ? h->connected : !slot;
+    info->connected_count=h->connected_count ? h->connected_count : 1;
     pthread_mutex_unlock(&host_lock);
     note_call(SLOW_INFO,start);
     return 0;
 }
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
-    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    const int slot=slot_of(handle);
+    if (slot<0) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
     const uint64_t start=now_us();
     pthread_mutex_lock(&host_lock); /* host_thread sends it */
-    if (rumble.large!=param[0] || rumble.small!=param[1]) { rumble.large=param[0]; rumble.small=param[1]; ++rumble.serial; }
+    if (rumble[slot].large!=param[0] || rumble[slot].small!=param[1]) {
+        rumble[slot].large=param[0]; rumble[slot].small=param[1]; ++rumble[slot].serial;
+    }
     pthread_mutex_unlock(&host_lock);
     note_call(SLOW_VIBRATION,start);
     __atomic_add_fetch(&vibrations,1,__ATOMIC_RELAXED);
     return 0;
 }
-static ABI int32_t pad_ok_handle(int32_t handle) { return handle==PAD_HANDLE && opened ? 0 : ERR_INVALID_HANDLE; }
+static ABI int32_t pad_ok_handle(int32_t handle) { return slot_of(handle)>=0 ? 0 : ERR_INVALID_HANDLE; }
 static ABI int32_t pad_ok_handle_flag(int32_t handle, uint8_t flag) { (void)flag; return pad_ok_handle(handle); }
 
+/* scePadSetLightBar(handle, {r,g,b}): the host thread puts the color on the gamepad's LED when it
+ * has one (a DualShock 4's light bar, a DualSense's), so each player sees whose pad is whose. */
 static ABI int32_t pad_light_bar(int32_t handle, const uint8_t *rgb) {
-    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
-    (void)rgb; return 0;
+    const int slot=slot_of(handle);
+    if (slot<0) return ERR_INVALID_HANDLE;
+    if (!rgb) return ERR_INVALID_ARG;
+    pthread_mutex_lock(&host_lock);
+    if (light[slot].r!=rgb[0] || light[slot].g!=rgb[1] || light[slot].b!=rgb[2]) {
+        light[slot].r=rgb[0]; light[slot].g=rgb[1]; light[slot].b=rgb[2]; ++light[slot].serial;
+    }
+    pthread_mutex_unlock(&host_lock);
+    return 0;
 }
 static const RuntimeExport exports[]={
     {"scePadSetLightBar",pad_light_bar}, {"scePadResetLightBar",pad_ok_handle},
@@ -624,10 +755,16 @@ static const RuntimeExport exports[]={
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
 void runtime_pad_report(void) {
-    char name[sizeof(gamepad_name)];
+    /* On the way out: a DualSense routed to its speaker gets its headphone jack back (the host
+       thread sends it; up to 50 ms). */
+    if (__atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE)==1) {
+        runtime_pad_speaker_route(0);
+        for (int i=0;i<50 && __atomic_load_n(&speaker_routed,__ATOMIC_ACQUIRE)==1;++i) SDL_Delay(1);
+    }
+    char name[PADS][sizeof(gamepad_name[0])];
     pthread_mutex_lock(&host_lock); memcpy(name,gamepad_name,sizeof(name)); pthread_mutex_unlock(&host_lock);
-    printf("Runtime: pad reads=%zu, vibrations=%zu, gamepad=%s; over 2 ms: reads %zu (max %.1f ms), "
-           "vibrations %zu (max %.1f ms), info %zu (max %.1f ms), host samples %zu (max %.1f ms)\n",reads,vibrations,name,
+    printf("Runtime: pad reads=%zu, vibrations=%zu, gamepads=%s / %s; over 2 ms: reads %zu (max %.1f ms), "
+           "vibrations %zu (max %.1f ms), info %zu (max %.1f ms), host samples %zu (max %.1f ms)\n",reads,vibrations,name[0],name[1],
            slow_calls[SLOW_READ],slow_max_us[SLOW_READ]/1e3,slow_calls[SLOW_VIBRATION],slow_max_us[SLOW_VIBRATION]/1e3,
            slow_calls[SLOW_INFO],slow_max_us[SLOW_INFO]/1e3,slow_calls[SLOW_HOST],slow_max_us[SLOW_HOST]/1e3);
 }

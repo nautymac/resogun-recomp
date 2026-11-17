@@ -12,7 +12,7 @@ The game's own x86-64 code runs directly on Windows and Linux: the PS4 system li
 
 🚨 **No game files are included** 🚨
 
-This requires you to provide a decrypted dump of your own copy of the game. Only tested with **CUSA00038** with **update 1.10**.
+This requires you to provide a decrypted dump of your own copy of the game: tested with **CUSA00038** with **update 1.10**, unmodified. Setup checks the files and, for any other version or a patched dump (such as a DLC unlocker; every add-on already shows as owned without one), warns once that they are untested and might cause bugs before going on.
 
 ## Features
 
@@ -23,10 +23,14 @@ This requires you to provide a decrypted dump of your own copy of the game. Only
   16:10 and 4:3 more above and below, nothing stretched. The menus stay 16:9.
 - **DLC support** from your own DLC dumps.
 - **Built in skip intro:** (optionally) boots straight to the main menu, the start-up logos and the "Press X" screen are skipped.
-- **Display settings in the game:** press **F10**, or hold **Select** (View, Back, Share) for two
-  seconds, for window mode, resolution, VSync, frame rate and more.
+- **Display settings in the game:** press **F10**, or hold **Select** (View, Back, Share) or **Start**
+  (Menu, Options) for two seconds, for window mode, resolution, VSync, frame rate and more.
 - **Keyboard and any gamepad.** DualShock 4 and DualSense work as they are, Xbox-style pads by
   button position.
+- **Local co-op:** connect a second gamepad and pick Multiplayer > Local Co-op; player 2 joins with
+  Cross (A).
+- **Controller speaker:** with a DualShock 4 or DualSense on USB, the sounds the game plays on the
+  controller come out of its speaker, as on a PS4 or PS5.
 - **Easy setup:** point the installer at your dump, and it can add a desktop shortcut (on Linux, an application menu entry).
 - **Works with [RecompLauncher](https://recomplauncher.com):** it installs and updates the game from these releases, sets it up from your dump and shows the settings on the game's page.
 
@@ -63,7 +67,7 @@ On a Steam Deck, do this in Desktop Mode; _Add a Non-Steam Game_ in Steam then l
 
 ### Updating
 
-Unzip the new release over the old folder and run the setup once more (the game asks you to). Your folders, saves and settings are kept. Setup also remembers the folders in `%APPDATA%\Resogun\paths.ini` (Linux: `~/.config/resogun/paths.ini`), so a release unzipped somewhere new only needs **Install**.
+Unzip the new release over the old folder and start the game as usual: the first start of a new release prepares the game again from your dump (a few seconds, with a progress window), then plays. Your folders, saves and settings are kept. Nothing is stored outside the game's folder: the chosen folders are in `paths.ini` next to `resogun.exe`. (Older versions also kept a copy in `%APPDATA%\Resogun`, Linux `~/.config/resogun`; the game moves it into its folder and removes it.) The setup window only opens by itself when no folders are set yet or one of them is gone.
 
 ### DLC
 
@@ -78,7 +82,7 @@ Resogun's add-ons (the extra ships and skins) carry no data of their own: the ga
 
 ## Settings
 
-`settings.ini` in your save folder holds every setting, each with a comment. The **Display Settings** panel (**F10**, or hold **Select** for two seconds) changes most of them while the game runs and saves them when it closes:
+`settings.ini` in your save folder holds every setting, each with a comment. The **Display Settings** panel (**F10**, or hold **Select** or **Start** for two seconds) changes most of them while the game runs and saves them when it closes:
 
 - aspect ratio (4:3, 16:9, 16:10, 21:9 or 32:9, at the next start), window mode, windowed resolution (the sizes of
   that ratio; applied a second after you stop changing it) and monitor. The fullscreen modes pick their
@@ -93,9 +97,15 @@ Resogun's add-ons (the extra ships and skins) carry no data of their own: the ga
 
 ## Controls
 
-The game sees one DualShock 4. Any gamepad works, mapped by button position: on an Xbox pad A B X Y
-are Cross, Circle, Square, Triangle, LB/RB are L1/R1, LT/RT are L2/R2, Menu is Options and View
-clicks the touchpad. The keyboard works alongside a gamepad:
+The game sees up to two DualShock 4s. Any gamepad works, mapped by button position: on an Xbox pad
+A B X Y are Cross, Circle, Square, Triangle, LB/RB are L1/R1, LT/RT are L2/R2, Menu is Options and
+View clicks the touchpad.
+
+For local co-op, the first gamepad connected is player 1 and the second is player 2 (a second
+player logged in on the PS4). Choose Multiplayer > Local Co-op and press Cross (A) on the second pad
+when the game asks. A pad that disconnects gets its player back when it reconnects.
+
+The keyboard always plays as player 1, alongside player 1's gamepad:
 
 | Keys                      | PS4                      |
 | ------------------------- | ------------------------ |
@@ -110,12 +120,12 @@ clicks the touchpad. The keyboard works alongside a gamepad:
 | Tab, P                    | Options                  |
 | T                         | touchpad click           |
 
-| Shortcut                                | What it does                                |
-| --------------------------------------- | ------------------------------------------- |
-| **F10**, or hold **Select** 2 s         | Display Settings                            |
-| **F9**                                  | sharpening on or off                        |
-| **F4**, or **Back** on the title screen | asks "Exit Resogun?" (No is selected first) |
-| **Alt+F4**                              | closes the game without confirmation        |
+| Shortcut                                                  | What it does                                |
+| --------------------------------------------------------- | ------------------------------------------- |
+| **F10**, or hold **Select** or **Start** 2 s              | Display Settings                            |
+| **F9**                                                    | sharpening on or off                        |
+| **F4**, **Select+Start**, or **Back** on the title screen | asks "Exit Resogun?" (No is selected first) |
+| **Alt+F4**                                                | closes the game without confirmation        |
 
 ## When something goes wrong
 

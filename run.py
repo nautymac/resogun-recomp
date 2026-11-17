@@ -10,7 +10,7 @@ Options: --game DIR (the decrypted dump; default RESOGUN_GAME_DIR), --timeout SE
 --out DIR (the game image, default out/game), --dlc DIR (one more folder of DLC next to the save's
 addcont, e.g. shadPS4's addcont; default RESOGUN_DLC_DIR). Other arguments go to resogun. Saves land in
 user/, shader caches in shaders/ next to the exe (out/shaders; RESOGUN_SHADER_DIR moves it), the GPU
-library's logs in the folder every copy of the game shares (shared_cache_dir), options in
+library's logs in gpu/ next to the exe (gpu_dir), options in
 user/settings.ini, or settings.ini here until that exists (see settings.example.ini).
 """
 import argparse
@@ -50,15 +50,12 @@ def isa_rewrite_wanted(missing, env):
     return bool(missing)
 
 
-def shared_cache_dir(env=os.environ):
-    """Shader and pipeline caches (and the GPU library's logs): one folder per PC, shared by run.py
-    and set-up copies of the game (src/launcher.c), whatever their save folder.
-    RESOGUN_GPU_USER_DIR overrides it."""
+def gpu_dir(exe, env=os.environ):
+    """The GPU library's folder (its logs, screenshots and frame captures): gpu/ next to the exe, as an
+    installed copy's (src/launcher.c), whatever the save folder. RESOGUN_GPU_USER_DIR overrides it."""
     if env.get('RESOGUN_GPU_USER_DIR'):
         return Path(env['RESOGUN_GPU_USER_DIR'])
-    if WINDOWS:
-        return Path(env.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local') / 'Resogun'
-    return Path(env.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'resogun'
+    return Path(exe).parent / 'gpu'
 
 
 def run_script(name, *args, check=True):
@@ -164,12 +161,12 @@ def main():
     if a.command == 'prepare':
         return 0
     exe = find_exe()
-    # The GPU library's folder (shader caches, logs) reaches every run of the exe through the environment,
-    # the --cpu-features one too: the shared cache, never the save folder, so test boots on a copy
+    # The GPU library's folder (logs, screenshots) reaches every run of the exe through the environment,
+    # the --cpu-features one too: gpu/ next to the exe, never the save folder, so test boots on a copy
     # of the save do not write to ./user.
     user = a.user.resolve()
     user.mkdir(parents=True, exist_ok=True)
-    os.environ['RESOGUN_GPU_USER_DIR'] = str(shared_cache_dir())
+    os.environ['RESOGUN_GPU_USER_DIR'] = str(gpu_dir(exe))
     # Shader caches: shaders/ next to the exe, as an installed copy's (src/launcher.c).
     os.environ.setdefault('RESOGUN_SHADER_DIR', str(exe.parent / 'shaders'))
     # Development runs log every routine event; installed copies only faults, stops and errors.

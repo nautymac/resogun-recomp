@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <unordered_map>
+#include <vector>
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "common/scope_exit.h"
@@ -85,6 +88,72 @@ static std::optional<std::filesystem::path> GetBundleParentDirectory() {
 }
 #endif
 
+// resogun: releases before v0.12 kept the GPU folder in one folder per PC (%LOCALAPPDATA%\Resogun,
+// ~/.cache/resogun); now it is gpu/ next to the exe. With RESOGUN_GPU_ADOPT_SHARED=1 (src/launcher.c,
+// an installed copy; not run.py) the old folder's screenshots and caches move into `to`, its logs are
+// deleted, and it is removed once empty. What `to` already has is kept, as is what cannot be moved.
+static void MoveOldSharedFolder(const fs::path& to) {
+    const char* adopt = std::getenv("RESOGUN_GPU_ADOPT_SHARED");
+    if (!adopt || std::strcmp(adopt, "1")) {
+        return;
+    }
+    fs::path from;
+#ifdef _WIN32
+    const wchar_t* local = _wgetenv(L"LOCALAPPDATA");
+    if (!local || !local[0]) {
+        return;
+    }
+    from = fs::path(local) / L"Resogun";
+#else
+    const char* cache_home = getenv("XDG_CACHE_HOME");
+    const char* home = getenv("HOME");
+    if (cache_home && cache_home[0]) {
+        from = fs::path(cache_home) / "resogun";
+    } else if (home && home[0]) {
+        from = fs::path(home) / ".cache" / "resogun";
+    } else {
+        return;
+    }
+#endif
+    std::error_code ec;
+    if (!fs::is_directory(from, ec) || fs::equivalent(from, to, ec)) {
+        return;
+    }
+    for (const char* sub : {SCREENSHOTS_DIR, CACHE_DIR, "captures"}) {
+        const fs::path old_dir = from / sub;
+        if (!fs::is_directory(old_dir, ec)) {
+            continue;
+        }
+        std::vector<fs::path> entries;
+        for (const auto& entry : fs::directory_iterator{old_dir, ec}) {
+            entries.push_back(entry.path());
+        }
+        for (const auto& entry : entries) {
+            const fs::path target = to / sub / entry.filename();
+            std::error_code move_ec;
+            if (fs::exists(target, move_ec)) {
+                continue;
+            }
+            fs::create_directories(target.parent_path(), move_ec);
+            fs::rename(entry, target, move_ec);
+            if (move_ec) { // another drive: copy, then delete what was copied
+                move_ec.clear();
+                fs::copy(entry, target, fs::copy_options::recursive, move_ec);
+                if (!move_ec) {
+                    fs::remove_all(entry, move_ec);
+                }
+            }
+        }
+        fs::remove(old_dir, ec); // only when empty
+    }
+    fs::remove_all(from / LOG_DIR, ec);
+    fs::remove(from / SHADER_DIR, ec);
+    if (fs::remove(from, ec)) {
+        std::printf("GPU folder: moved %s into %s\n", PathToUTF8String(from).c_str(),
+                    PathToUTF8String(to).c_str());
+    }
+}
+
 // resogun: built on first use, not before main, so a launch that reads its save folder from
 // paths.ini (src/launcher.c) can still set RESOGUN_GPU_USER_DIR first.
 static std::unordered_map<PathType, fs::path>& UserPaths() {
@@ -116,6 +185,7 @@ static std::unordered_map<PathType, fs::path>& UserPaths() {
     }
 
     std::unordered_map<PathType, fs::path> paths;
+    MoveOldSharedFolder(user_dir);
 
     const auto create_path = [&](PathType shad_path, const fs::path& new_path) {
         // resogun: with parents, so a Linux home without ~/.local/share still starts.
@@ -171,8 +241,8 @@ std::string GetUserPathString(PathType shad_path) {
 }
 
 // resogun: on the first start with a shaders folder, the cache earlier releases kept elsewhere is
-// moved into it: <RESOGUN_GPU_USER_DIR>/cache/<serial> (%LOCALAPPDATA%\Resogun, ~/.cache/resogun
-// or paths.ini's cache=), and on Linux shadPS4's folder, which the port used while the first
+// moved into it: <RESOGUN_GPU_USER_DIR>/cache/<serial> (gpu/ next to the exe, where
+// MoveOldSharedFolder put an older one, or paths.ini's cache=), and on Linux shadPS4's folder, which the port used while the first
 // one did not exist. Only a folder with the port's disk_shaders.bin marker is taken, so an
 // installed shadPS4's own cache stays where it is.
 static void MoveOldShaderCache(const fs::path& to, std::string_view serial) {

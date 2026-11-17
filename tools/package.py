@@ -80,7 +80,9 @@ you own (ships and skins) need no files: a DLC folder with their sce_sys folders
 2. Press Play Game, or later start resogun.exe or the shortcut.
 
 Run resogun-setup.exe again to change the game or save folder. After unpacking a newer release
-over this folder, run it once more: it keeps your folders and settings.
+over this folder, just start the game: it prepares itself again from your dump the first time,
+keeping your folders and settings. The game was tested with the unmodified dump of CUSA00038
+with update 1.10; with any other, setup warns once that the files are untested and might cause bugs.
 
 In the game: F10, or Select (Share/View) held for two seconds, opens the display settings (window,
 resolution, VSync, 60/90/120/144/180 FPS); F4, or Back on the title screen, asks to close the game.
@@ -107,7 +109,9 @@ you own (ships and skins) need no files: a DLC folder with their sce_sys folders
 2. Start the game from the menu entry, or run ./resogun.
 
 Run resogun-setup again to change the game or save folder. After unpacking a newer release
-over this folder, run it once more: it keeps your folders and settings.
+over this folder, just start the game: it prepares itself again from your dump the first time,
+keeping your folders and settings. The game was tested with the unmodified dump of CUSA00038
+with update 1.10; with any other, setup warns once that the files are untested and might cause bugs.
 
 In the game: F10, or Select (Share/View) held for two seconds, opens the display settings (window,
 resolution, VSync, 60/90/120/144/180 FPS); F4, or Back on the title screen, asks to close the game.

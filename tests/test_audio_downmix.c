@@ -15,6 +15,9 @@ static int stub_mode=MODE_AUTO;
 int resogun_gpu_audio_channels(void) { return stub_mode; }
 /* The menu's pause (resogun_gpu.cpp): never paused here. */
 void resogun_gpu_wait_while_paused(void) {}
+/* The controller speaker (runtime_pad.c): no controller here. */
+int runtime_pad_speaker(void) { return RUNTIME_PAD_SPEAKER_NONE; }
+void runtime_pad_speaker_route(int on) { (void)on; }
 
 static int near(float a, float b) { return fabsf(a-b)<1e-3f; }
 static void set_env(const char *name, const char *value) {
@@ -202,8 +205,32 @@ static void test_end_to_end(void) {
     assert(out_channels==output_channels(MODE_AUTO,device.channels) && n==(size_t)256*(size_t)out_channels);
 }
 
+/* Pad speaker ports on a controller: which device is the controller's, and the port's mono mix on
+   the two speaker channels at the game's level (no main-output attenuation), haptics silent. */
+static void test_pad_speaker(void) {
+    assert(pad_device_matches("Speakers (2- DualSense Wireless Controller)",RUNTIME_PAD_SPEAKER_DUALSENSE));
+    assert(pad_device_matches("Sony Interactive Entertainment DualSense Wireless Controller Analog Surround 4.0",RUNTIME_PAD_SPEAKER_DUALSENSE));
+    assert(!pad_device_matches("Speakers (Wireless Controller)",RUNTIME_PAD_SPEAKER_DUALSENSE));
+    assert(pad_device_matches("Speakers (Wireless Controller)",RUNTIME_PAD_SPEAKER_DS4));
+    assert(!pad_device_matches("Speakers (DualSense Wireless Controller)",RUNTIME_PAD_SPEAKER_DS4));
+    assert(!pad_device_matches("Speakers (Realtek(R) Audio)",RUNTIME_PAD_SPEAKER_DS4));
+    assert(!pad_device_matches(NULL,RUNTIME_PAD_SPEAKER_DS4) && !pad_device_matches("Wireless Controller",RUNTIME_PAD_SPEAKER_NONE));
+
+    Port p; memset(&p,0,sizeof(p));
+    p.type=4; p.channels=1; p.is_float=1; p.frames=256; p.out_channels=4; p.on_pad=1; p.mix_level=VOLUME_0DB;
+    for (int c=0;c<8;++c) p.volume[c]=VOLUME_0DB;
+    float in[256], out[256*4];
+    for (int i=0;i<256;++i) in[i]=0.5f;
+    shape_buffer(&p,in,out);
+    assert(near(out[0],0.5f) && near(out[1],0.5f) && near(out[2],0) && near(out[3],0) && near(out[255*4+1],0.5f));
+    p.on_pad=0; p.out_channels=1;                    /* on the main output it is turned down */
+    shape_buffer(&p,in,out);
+    assert(near(out[0],0.5f*PAD_SPEAKER_GAIN));
+}
+
 int main(void) {
     test_layout_choice();
+    test_pad_speaker();
     test_soft_limit();
     test_fold();
     test_shape_buffer();

@@ -30,8 +30,9 @@ struct Options {
     std::filesystem::path dlc; // optional: one more folder of DLC (e.g. shadPS4's addcont); empty for none
     // Optional: called as each step starts, with how far along the install is (0 to 1) and the step.
     std::function<void(double, const std::wstring&)> progress;
-    // Optional: asked, with a warning for the user, whether to go on with an eboot.bin that is not a
-    // verified build; true goes on. Unset: the warning is logged and the install goes on.
+    // Optional: asked, with a warning for the player, whether to go on with game files that are not the
+    // verified build (once per dump: game/untested.txt remembers the answer); true goes on. Unset: the
+    // warning is logged and the install goes on.
     std::function<bool(const std::wstring&)> confirm;
 };
 
@@ -71,17 +72,25 @@ std::filesystem::path game_folder(const std::filesystem::path& path);
 std::vector<std::wstring> missing_game_files(const std::filesystem::path& game);
 // What `root`/paths.ini names, if it names both folders.
 std::optional<Paths> read_paths(const std::filesystem::path& root);
-// The per-user copy of paths.ini that install() also writes: %APPDATA%\Resogun\paths.ini, or $XDG_CONFIG_HOME/resogun/paths.ini (~/.config when unset); src/launcher.c
-// reads it when the release folder has none. Empty when %APPDATA% is unset.
+// The per-user copy of paths.ini that setups before v0.12 also wrote: %APPDATA%\Resogun\paths.ini,
+// or $XDG_CONFIG_HOME/resogun/paths.ini (~/.config when unset). Empty when %APPDATA% is unset.
 std::filesystem::path user_paths_ini();
-// read_paths(root), else the per-user copy: the folders to start from in a release just unpacked.
+// Moves that per-user copy into `root` (when `root` has no paths.ini; otherwise it is only deleted),
+// and its folder too when nothing else is in it: paths.ini lives only next to the exe. src/launcher.c
+// does the same.
+void adopt_user_paths(const std::filesystem::path& root);
+// adopt_user_paths(root), then read_paths(root): the folders to start from.
 std::optional<Paths> remembered_paths(const std::filesystem::path& root);
 // save/ in the release folder: a release is never zipped with one, so unpacking a newer release over
 // the folder keeps the saves.
 std::filesystem::path default_save();
 // True when `root` is set up for its release: paths.ini names both folders and game/ was prepared
-// for this release.txt (what src/launcher.c checks before it starts the game).
+// for this release.txt from the eboot.bin the dump holds now (what src/launcher.c checks before it
+// starts the game; otherwise it has the setup prepare it again with --update).
 bool ready(const std::filesystem::path& root);
+// game/source.txt's stamp of the dump an image was prepared from: "<size> <mtime>" of its eboot.bin
+// (seconds since 1970), as src/launcher.c computes it; empty when there is no eboot.bin.
+std::string source_stamp(const std::filesystem::path& game);
 // True when `save` holds game saves (a savedata folder with something in it).
 bool has_saves(const std::filesystem::path& save);
 // settings.ini skip_intro as the game reads it: from the save folder's file when there is one,
@@ -104,7 +113,8 @@ void set_game_settings(const std::filesystem::path& root, const std::filesystem:
                        const std::vector<std::pair<std::wstring, std::wstring>>& values);
 bool same_path(const std::filesystem::path& a, const std::filesystem::path& b);
 
-// Sets up opt.root, reporting each step through `log`. Throws Error. Returns the game exe's path.
+// Sets up opt.root, reporting each step through `log`. Throws Error, also when opt.confirm turns down a
+// dump that is not the unmodified CUSA00038 update 1.10. Returns the game exe's path.
 std::filesystem::path install(const Options& opt, const Log& log);
 
 // Writes a shortcut at `lnk` that starts `target` in its own folder. Throws Error.

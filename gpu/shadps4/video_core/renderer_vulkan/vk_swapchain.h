@@ -128,6 +128,7 @@ private:
     vk::PresentModeKHR present_mode;
     bool vsync = true;     ///< the settings present_mode was chosen for
     bool tearing = false;
+    int display_mode = -1; ///< resogun: the display mode the swapchain was made for (UpdateVsync)
     vk::Extent2D extent;
     vk::SurfaceTransformFlagBitsKHR transform;
     vk::CompositeAlphaFlagBitsKHR composite_alpha;

@@ -57,9 +57,12 @@ python run.py --timeout 20
   next to the exe (`out/shaders`; an installed copy's is next to `resogun-setup`), and
   `RESOGUN_SHADER_DIR` moves it. On the first start with an empty one, the cache earlier releases
   kept in `<GPU folder>/cache/CUSA00038` is moved in (on Linux also shadPS4's folder, which was used
-  while `~/.cache/resogun` did not exist). The GPU library's logs and screenshots stay in one folder
-  per PC, `%LOCALAPPDATA%\Resogun` (`~/.cache/resogun`), shared with installed copies
-  (`RESOGUN_GPU_USER_DIR` moves it).
+  while `~/.cache/resogun` did not exist). The GPU library's logs, screenshots and frame captures go
+  to `gpu/` next to the exe (`out/gpu`; an installed copy's is next to `resogun-setup`, or paths.ini's
+  `cache=`), and `RESOGUN_GPU_USER_DIR` moves it. Releases before v0.12 kept it in one folder per PC,
+  `%LOCALAPPDATA%\Resogun` (`~/.cache/resogun`): an installed copy moves its screenshots and caches
+  into `gpu/` on the first start, deletes its logs and removes it (`RESOGUN_GPU_ADOPT_SHARED`, set by
+  `src/launcher.c`; `run.py` never does). Nothing is kept outside the game's folder.
 - Every `settings.ini` key has an environment variable that overrides it, named in
   `settings.example.ini`. A variable left set in a shell keeps overriding the panel:
   `RESOGUN_VBLANK_HZ` prints a warning at start for that reason.
@@ -109,14 +112,17 @@ G-Sync, following the display's own timing settled at 97 FPS.
 In combat the game's CPU writes records (eboot 0x1c90a7, a copy loop at 0x6c4bf8, CRT copies) into
 pages it shares with small GPU-written buffers: the 5 KiB destination of a compute copy (shader
 0x069f1335) and a 64 KiB storage buffer (0xf003dbab). Page tracking is per 4 KiB page, so each
-such write fault used to download the GPU's bytes first, a `scheduler.Finish()` that waits for the
-whole queue: about 160 a second, 4 ms of GPU idle per frame on a Radeon 890M (73 to 79 FPS at
-1080p). The writes almost never touch a byte the GPU wrote, so `BufferCache::TryMergeWrite` lets
-them go ahead without downloading and keeps a copy of the page's GPU-written bytes; the page's next
-upload (`EmitUploadRange`) leaves out those that the guest has not changed since. Relaxed readback
-mode only (the default), where pages are never read-protected. Toggle `WriteMerge` (bit 50) turns
-it off; `RESOGUN_FRAME_STATS=1` prints the merged writes per second, `RESOGUN_PERF_DIAG=1` the
-downloads that remain with the guest instruction and the GPU writer behind each.
+such write fault downloads the GPU's bytes in the 512 KiB around it first, a `scheduler.Finish()`
+that waits for the whole queue: about 100 to 160 a second, 4 ms of GPU idle per frame on a Radeon
+890M (73 to 79 FPS at 1080p). `RESOGUN_PERF_DIAG=1` lists these downloads with the guest
+instruction and the GPU writer behind each.
+
+Letting those writes go ahead without the download (keeping the page's GPU-written bytes out of
+its next upload) removed the wait, but the downloads are also how the GPU's results reach the guest
+in Relaxed readback mode, and the game reads the compute copy's: the player ship's death explosion
+(a screen-filling flash, then orange beams) drew as a small blue fireball. Merging only within 4
+GPU frames of the window's last download still lost the beams in 2 of 10 deaths, and merging only
+the storage buffer's pages saved 10 faults a second, so the downloads stay.
 
 ### Render resolution
 
@@ -169,11 +175,11 @@ With `skip_intro=1` (the default) the loader passes `-nosplash`, then presses Cr
 title screen appears: the AvPlayer opening `title.mp4` marks it (`runtime_pad_title_movie`,
 `src/runtime_pad.c`). A start lands in the main menu.
 
-On the title screen, Back (Circle, B, Escape) asks "Exit Resogun?" (`title_back_exits=1`); F4 asks
-anywhere. The prompt is drawn by the overlay and takes the input while open; Yes pushes the same
-quit event as closing the window. Holding Select (SDL's Back button) for two seconds opens the
-Display Settings panel (F10 too): the button's own press is held back while it is down, and a release
-before two seconds sends it to the game as a short tap.
+On the title screen, Back (Circle, B, Escape) asks "Exit Resogun?" (`title_back_exits=1`); F4 and
+Select+Start ask anywhere. The prompt is drawn by the overlay and takes the input while open; Yes pushes the same
+quit event as closing the window. Holding Select (SDL's Back button) or Start for two seconds opens the
+Display Settings panel (F10 too): each button's own press is held back while it is down, and a release
+without a shortcut sends it to the game as a short tap (`menu_buttons`, `src/runtime_pad.c`).
 
 ## Save data, DLC and trophies
 
@@ -197,8 +203,19 @@ save folders and, when one is chosen, `dlc=`. The command line does the same as 
 `resogun-setup.exe --help`.
 
 Started with no arguments, `resogun.exe` reads `paths.ini` and builds the command line `run.py`
-would pass (`src/launcher.c`); without a console its output goes to `log/resogun.log` in the save
-folder. It also watches the game: it starts the same command line as a child (on Windows in a job
+would pass (`src/launcher.c`). `paths.ini` lives only next to the exe: a per-user copy an older
+setup wrote (`%APPDATA%\Resogun`, `~/.config/resogun`) is moved there when it has none, and deleted.
+Without a `paths.ini`, or when a folder it names is gone, it opens the setup instead and waits for it. When `game/` was not prepared for this
+`release.txt`, or from the dump's `eboot.bin` as it is now (`game/source.txt`: its size and
+modification time), it runs `resogun-setup --update` first, which prepares the game again from the
+folders already set in a small progress window and exits 0 when done; the game starts only then.
+Setup checks for the verified build (`scripts/prepare.py` `VERIFIED_BUILDS`, the eboot's SHA-256,
+and `VERIFIED_TITLE`, `param.sfo`'s CUSA00038 / 01.10). For any other dump it warns that the files are
+untested and might cause bugs, and prepares it with `--any-build` only when the player goes on; the
+answer is kept in `game/untested.txt` (the eboot's stamp, as `source.txt`), so later preparations of
+the same dump, such as `--update` after a new release, do not ask again. Without a dialog (the
+command line) the warning is logged and setup goes on. Without a console the
+game's output goes to `log/resogun.log` in the save folder. The launcher also watches the game: it starts the same command line as a child (on Windows in a job
 that ends it if the launcher is killed, on Linux by `fork` with `PR_SET_PDEATHSIG`), and when the
 game ends with an exit code other than 0 it notes the code in the log, copies the log to
 `log/crash-<date>-<time>.log` and says so in a message box. `RESOGUN_CRASH_WATCH=0` turns that off.
@@ -214,8 +231,13 @@ The pad and keyboard layouts are fixed tables in `src/runtime_pad.c` (README "Co
 by button position, keys by physical position. `resogun --gamepad` prints the connected pad and its
 labels.
 
+Two users: the first gamepad opened is user 1's pad (handle 1, with the keyboard), the second user
+2's (handle 2). UserService logs user 2 in (a LOGIN event, then in the login list) once a second
+gamepad has connected; the game opens user 2's pad itself and its local co-op join screen takes
+Cross from it.
+
 Scripted input for automated runs: `RESOGUN_PAD_FILE` (held buttons and stick values, re-read when
-the file changes), `RESOGUN_PAD_RECORD` (F9 records the pad) and `RESOGUN_PAD_REPLAY`.
+the file changes; `p2:cross`, `p2:lx=0` press for user 2), `RESOGUN_PAD_RECORD` (F9 records the pad) and `RESOGUN_PAD_REPLAY`.
 
 ## Layout
 

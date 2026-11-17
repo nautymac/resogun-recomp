@@ -17,6 +17,9 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 }
 /* The menu's audio setting (resogun_gpu.cpp): the layout that follows the device. */
 int resogun_gpu_audio_channels(void) { return 0; }
+/* The controller speaker (runtime_pad.c): no controller here. */
+int runtime_pad_speaker(void) { return RUNTIME_PAD_SPEAKER_NONE; }
+void runtime_pad_speaker_route(int on) { (void)on; }
 
 #ifdef _WIN32
 static SDL_AudioStream *mock_fail_wasapi(SDL_AudioDeviceID dev, const SDL_AudioSpec *spec, SDL_AudioStreamCallback cb, void *user) {

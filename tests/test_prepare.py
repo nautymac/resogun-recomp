@@ -3,7 +3,7 @@ import struct
 import unittest
 import tempfile
 from pathlib import Path
-from prepare import UnverifiedBuild, VERIFIED_BUILDS, verified_build, parse_self, inspect_libc, load_sfo, nid, prepare, read_self, read_sfo, sfo, write_report
+from prepare import UnverifiedBuild, VERIFIED_BUILDS, verified_build, verified_title, parse_self, inspect_libc, load_sfo, nid, prepare, read_self, read_sfo, sfo, write_report
 
 
 def fixture():
@@ -159,6 +159,13 @@ class VerifiedBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(UnverifiedBuild, 'not a build this release was verified with'):
             verified_build(sha)
         self.assertEqual(verified_build(sha, any_build=True), '')
+
+    def test_param_sfo_must_name_cusa00038_update_110(self):
+        verified_title({'TITLE_ID': 'CUSA00038', 'APP_VER': '01.10'})
+        for values in ({'TITLE_ID': 'CUSA00038', 'APP_VER': '01.00'}, {'TITLE_ID': 'CUSA00219', 'APP_VER': '01.10'}, {}):
+            with self.assertRaisesRegex(UnverifiedBuild, 'needs CUSA00038 with update 01.10'):
+                verified_title(values)
+            verified_title(values, any_build=True)
 
     def test_refused_before_anything_is_written(self):
         with tempfile.TemporaryDirectory() as tmp:

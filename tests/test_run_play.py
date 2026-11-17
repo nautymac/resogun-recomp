@@ -12,7 +12,7 @@ import run
 
 class RunPlayTests(unittest.TestCase):
     def test_shared_cache_reaches_every_exe_run(self):
-        # The GPU library's folder is the shared cache from the first run of the exe (--cpu-features) on,
+        # The GPU library's folder is RESOGUN_GPU_USER_DIR (else gpu/ by the exe) from the first run of the exe (--cpu-features) on,
         # never the save folder, so test boots on a copy of the save do not write to user/.
         seen = []
         features = mock.Mock(returncode=0, stdout='CPU: complete\n')
@@ -43,11 +43,11 @@ class RunPlayTests(unittest.TestCase):
                 self.assertIn(str(user.resolve()), popen.call_args.args[0])
             self.assertTrue(user.is_dir())
 
-    def test_shared_cache_dir_is_per_pc(self):
+    def test_gpu_dir_is_next_to_the_exe(self):
         env = {'LOCALAPPDATA': r'C:\Users\a\AppData\Local', 'XDG_CACHE_HOME': '/home/a/.cache'}
-        expected = Path(env['LOCALAPPDATA']) / 'Resogun' if run.WINDOWS else Path('/home/a/.cache/resogun')
-        self.assertEqual(run.shared_cache_dir(env), expected)
-        self.assertEqual(run.shared_cache_dir({**env, 'RESOGUN_GPU_USER_DIR': 'elsewhere'}), Path('elsewhere'))
+        exe = Path('release') / 'resogun.exe'
+        self.assertEqual(run.gpu_dir(exe, env), Path('release') / 'gpu')
+        self.assertEqual(run.gpu_dir(exe, {**env, 'RESOGUN_GPU_USER_DIR': 'elsewhere'}), Path('elsewhere'))
 
 
 if __name__ == '__main__':

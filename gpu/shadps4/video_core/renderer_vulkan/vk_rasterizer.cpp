@@ -3200,7 +3200,6 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     DrainDrawPipe();
     buffer_cache.InvalidateMemory(addr, size);
-    buffer_cache.ForgetMergedWrites(addr, size);
     texture_cache.UnmapMemory(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};

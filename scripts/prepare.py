@@ -136,7 +136,7 @@ def read_sfo(path):
 VERIFIED_BUILDS = {
     'c8de3071d96b57a4ccc9b94abaadbe68a133933b34f7396d4a00fb1c6c5a5612': '01.10',
 }
-EXIT_UNVERIFIED = 3  # the setup warns that eboot.bin is not a verified build, then may pass --any-build
+EXIT_UNVERIFIED = 3  # eboot.bin or param.sfo is not the verified build: the setup warns, then may pass --any-build
 
 
 class UnverifiedBuild(Exception):
@@ -151,6 +151,19 @@ def verified_build(sha256, any_build=False):
                               f'It needs the unmodified eboot.bin of Resogun CUSA00038 update '
                               f'{", ".join(sorted(set(VERIFIED_BUILDS.values())))}.')
     return build or ''
+
+
+# The title and update the verified builds belong to: param.sfo's TITLE_ID and APP_VER must match too.
+VERIFIED_TITLE = ('CUSA00038', '01.10')
+
+
+def verified_title(values, any_build=False):
+    """Checks param.sfo's TITLE_ID and APP_VER against VERIFIED_TITLE; UnverifiedBuild unless they
+    match (or any_build)."""
+    found = (values.get('TITLE_ID'), values.get('APP_VER'))
+    if found != VERIFIED_TITLE and not any_build:
+        raise UnverifiedBuild(f'param.sfo names {found[0]} version {found[1]}; this release needs '
+                              f'{VERIFIED_TITLE[0]} with update {VERIFIED_TITLE[1]}.')
 
 
 def write_report(path, report):
@@ -198,6 +211,7 @@ def inspect_libc(path):
 def prepare(game, out, any_build=False):
     source = read_self(game / 'eboot.bin')
     build = verified_build(hashlib.sha256(source).hexdigest(), any_build)
+    verified_title(sfo((game / 'sce_sys/param.sfo').read_bytes()), any_build)
     elf, header, ph, segments, missing = parse_self(source)
     loads = [p for p in ph if p['type'] in (1, 0x61000010)]
     def mapped(addr, size=8):

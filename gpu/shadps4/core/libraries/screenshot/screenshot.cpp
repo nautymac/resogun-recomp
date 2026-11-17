@@ -19,7 +19,8 @@ int PS4_SYSV_ABI sceScreenShotCapture() {
 }
 
 int PS4_SYSV_ABI sceScreenShotDisable() {
-    LOG_ERROR(Lib_Screenshot, "(STUBBED) called");
+    // resogun: no system screenshot feature on PC; the game calls this at boot.
+    LOG_DEBUG(Lib_Screenshot, "called");
     return ORBIS_OK;
 }
 
@@ -29,7 +30,8 @@ int PS4_SYSV_ABI sceScreenShotDisableNotification() {
 }
 
 int PS4_SYSV_ABI sceScreenShotEnable() {
-    LOG_ERROR(Lib_Screenshot, "(STUBBED) called");
+    // resogun: no system screenshot feature on PC; the game calls this at boot.
+    LOG_DEBUG(Lib_Screenshot, "called");
     return ORBIS_OK;
 }
 
@@ -59,7 +61,8 @@ int PS4_SYSV_ABI sceScreenShotIsVshScreenCaptureDisabled() {
 }
 
 int PS4_SYSV_ABI sceScreenShotSetOverlayImage() {
-    LOG_ERROR(Lib_Screenshot, "(STUBBED) called");
+    // resogun: no system screenshot feature on PC; the game calls this at boot.
+    LOG_DEBUG(Lib_Screenshot, "called");
     return ORBIS_OK;
 }
 
